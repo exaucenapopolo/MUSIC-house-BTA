@@ -33,14 +33,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setState({ user: null, profile: null, loading: false, error: null });
       return;
     }
-    return onIdTokenChanged(auth, async (user) => {
+    const firebaseAuth = auth;
+    const firestore = db;
+    return onIdTokenChanged(firebaseAuth, async (user) => {
       if (!user) {
         setState({ user: null, profile: null, loading: false, error: null });
         return;
       }
       try {
         const [token, userDoc] = await Promise.all([
-          user.getIdTokenResult(), getDoc(doc(db, 'users', user.uid)),
+          user.getIdTokenResult(), getDoc(doc(firestore, 'users', user.uid)),
         ]);
         const claimRole = token.claims.role;
         const profileData = userDoc.exists() ? userDoc.data() : {};
