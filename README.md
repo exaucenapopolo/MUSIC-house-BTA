@@ -148,3 +148,28 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 ## Licence
 
 Voir `LICENSE`.
+
+## Configuration Firebase déjà renseignée
+
+La configuration Web fournie pour le projet `music-house-bta` est intégrée dans `src/firebase.ts` comme configuration par défaut et préremplie dans `.env.example`. La configuration publique est donc disponible en développement et en build, même si aucun fichier `.env` local n'a encore été créé. Les variables `VITE_FIREBASE_*` peuvent toujours remplacer ces valeurs lors d'un déploiement.
+
+Le projet Firebase utilisé est `music-house-bta`, avec le domaine Auth `music-house-bta.firebaseapp.com`, le bucket `music-house-bta.firebasestorage.app` et la mesure Analytics `G-5JMCBBRKX2`.
+
+### Activation obligatoire dans Firebase Console
+
+La configuration Web ne crée pas à elle seule la base ni n'active les méthodes d'authentification. Dans le projet `music-house-bta), le propriétaire doit vérifier :
+1. **Authentication → Sign-in method → Email/Password** : activer le fournisseur e-mail/mot de passe.
+2. **Firestore Database** : créer la base de données native si elle n'existe pas encore et choisir sa région.
+3. **Authentication → Settings → Authorized domains** : vérifier que le domaine de l'application sera autorisé.
+
+Après connexion avec Firebase CLI, le projet par défaut est défini par le fichier `.firebaserc`. Déployer les règles et les index avec :
+```powershell
+firebase login
+firebase deploy --only firestore:rules,firestore:indexes
+```
+
+### Avertissement — règles temporaires
+
+Pour faciliter l'inscription, la connexion, les tests et le développement initial, les règles Firestore V1 sont volontairement simplifiées : **tout compte authentifié peut lire et écrire tous les documents**, tandis que les visiteurs non connectés sont refusés. Les rôles Manager/Producteur/Client restent présents dans l'application et dans les custom claims, mais ces règles temporaires ne séparent pas encore les données selon ces rôles.
+
+Ne pas conserver ces règles pour une ouverture publique, ni y stocker de vraies données financières ou privées partagées avec des comptes non fiables. Avant la mise en production, remplacer ce mode temporaire par des règles spécifiques à chaque collection et à chaque rôle, puis relancer `npm run test:rules`.
