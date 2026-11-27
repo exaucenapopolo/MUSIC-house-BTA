@@ -9,6 +9,11 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/users/$(uid()))
         && get(/databases/$(database)/documents/users/$(uid())).data.active == true;
     }
+    function activeUserAfter() {
+      return signedIn()
+        && existsAfter(/databases/$(database)/documents/users/$(uid()))
+        && getAfter(/databases/$(database)/documents/users/$(uid())).data.active == true;
+    }
     function manager() { return activeUser() && role() == 'manager'; }
     function producer() { return activeUser() && role() == 'producer'; }
     function client() { return activeUser() && role() == 'client'; }
@@ -52,7 +57,7 @@ service cloud.firestore {
     match /artists/{artistId} {
       allow read: if manager() || (producer() && resource.data.producerUids is list && resource.data.producerUids.hasAny([uid()])) || (activeUser() && resource.data.ownerUid == uid());
       allow create: if manager()
-        || (activeUser() && client() && request.resource.data.ownerUid == uid()
+        || (activeUserAfter() && client() && request.resource.data.ownerUid == uid()
           && request.resource.data.status == 'active'
           && request.resource.data.source == 'site'
           && request.resource.data.keys().hasOnly([
