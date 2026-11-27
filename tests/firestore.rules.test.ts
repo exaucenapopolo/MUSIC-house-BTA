@@ -5,7 +5,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import {
-  collection, doc, getDoc, getDocs, query, setDoc, updateDoc,
+  collection, doc, getDoc, getDocs, query, setDoc, updateDoc, writeBatch,
   Timestamp, where,
 } from 'firebase/firestore';
 
@@ -44,6 +44,23 @@ describe('isolation des rôles Firestore', () => {
     await assertFails(setDoc(doc(client, 'users/client-a'), {
       uid: 'client-a', role: 'manager', active: true, email: 'a@example.test', displayName: 'A',
     }));
+  });
+
+  it('autorise la création atomique du compte client et de sa fiche artiste', async () => {
+    const client = testEnv.authenticatedContext('new-client', { role: 'client' }).firestore();
+    const batch = writeBatch(client);
+    batch.set(doc(client, 'users/new-client'), {
+      uid: 'new-client', email: 'new@example.test', displayName: 'Nouvel artiste',
+      role: 'client', active: true, artistId: 'new-client', createdAt: Timestamp.now(),
+    });
+    batch.set(doc(client, 'artists/new-client'), {
+      ownerUid: 'new-client', fullName: 'Nouvel artiste', email: 'new@example.test',
+      phone: '+237600000000', status: 'active', source: 'site',
+      createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+      termsVersion: 'V1', termsAcceptedAt: Timestamp.now(),
+    });
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(getDoc(doc(client, 'artists/new-client')));
   });
 
   it('permet au producteur de lire uniquement ses artistes affectés et ses commissions', async () => {
