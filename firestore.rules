@@ -1,0 +1,12 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // MODE TEMPORAIRE DE DÉVELOPPEMENT :
+    // toute personne connectée peut lire et écrire dans Firestore.
+    // Les visiteurs non authentifiés sont refusés.
+    // À remplacer par des règles par rôle/collection avant l'ouverture publique.
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
