@@ -57,10 +57,10 @@ service cloud.firestore {
 
     match /artists/{artistId} {
       allow get: if manager()
-        || (producer() && uid() in resource.data.producerUids)
+        || (producer() && resource.data.producerUids.hasAny([uid()]))
         || (client() && resource.data.ownerUid == uid());
       allow list: if manager()
-        || (producer() && uid() in resource.data.producerUids);
+        || (producer() && resource.data.producerUids.hasAny([uid()]));
       allow create: if manager()
         || (clientAfter() && request.resource.data.ownerUid == uid()
           && request.resource.data.status == 'active'
