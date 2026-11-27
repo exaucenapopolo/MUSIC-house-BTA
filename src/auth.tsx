@@ -1,12 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  createUserWithEmailAndPassword, onIdTokenChanged, sendEmailVerification,
-  sendPasswordResetEmail, signInWithEmailAndPassword, signOut,
+  createUserWithEmailAndPassword, GoogleAuthProvider, onIdTokenChanged, sendEmailVerification,
+  sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut,
   updateProfile, type User,
 } from 'firebase/auth';
-import { clearIndexedDbPersistence, doc, getDoc, serverTimestamp, terminate, writeBatch } from 'firebase/firestore';
+import { clearIndexedDbPersistence, doc, getDoc, serverTimestamp, setDoc, terminate, writeBatch } from 'firebase/firestore';
 import type { Role, UserProfile } from './domain';
 import { auth, db, firebaseConfigured, requireFirebase } from './firebase';
+import { notifyStudioEmail } from './studioApi';
 
 interface AuthState {
   user: User | null;
@@ -17,6 +18,7 @@ interface AuthState {
 
 interface AuthContextValue extends AuthState {
   login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: () => Promise<void>;
   register: (name: string, email: string, password: string, phone: string) => Promise<void>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
@@ -41,9 +43,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const [token, userDoc] = await Promise.all([
-          user.getIdTokenResult(), getDoc(doc(firestore, 'users', user.uid)),
-        ]);
+        let token = await user.getIdTokenResult();
+        if (String(user.email || '').toLowerCase() === 'exaucenapopolo2@gmail.com' && token.claims.role !== 'manager') {
+          try {
+            const response = await fetch('/api/studio', {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + await user.getIdToken(), 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'bootstrapManager' }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (response.ok && payload.success) token = await user.getIdTokenResult(true);
+            else if (response.status === 403) console.warn('[MUSIC HOUSE MANAGER]', payload.error || 'Vérifiez le compte manager.');
+          } catch (bootstrapError) {
+            console.warn('[MUSIC HOUSE MANAGER]', bootstrapError instanceof Error ? bootstrapError.message : bootstrapError);
+          }
+        }
+        const userDoc = await getDoc(doc(firestore, 'users', user.uid));
         const claimRole = token.claims.role;
         const profileData = userDoc.exists() ? userDoc.data() : {};
         const role: Role = claimRole === 'manager' || claimRole === 'producer' ? claimRole : 'client';
@@ -53,6 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           displayName: user.displayName || String(profileData.displayName || ''),
           role,
           active: userDoc.exists() && profileData.active === true,
+          photoURL: String(profileData.photoURL || user.photoURL || '') || undefined,
           artistId: typeof profileData.artistId === 'string' ? profileData.artistId : undefined,
           createdAt: profileData.createdAt,
         };
@@ -79,21 +95,83 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const artistRef = doc(firestore, 'artists', credential.user.uid);
       const batch = writeBatch(firestore);
       batch.set(userRef, {
-        uid: credential.user.uid, email: email.trim(), displayName: name.trim(),
+        uid: credential.user.uid, email: email.trim(), displayName: name.trim(), photoURL: credential.user.photoURL || '',
         role: 'client', active: true, artistId: credential.user.uid, createdAt: serverTimestamp(),
       });
       batch.set(artistRef, {
-        ownerUid: credential.user.uid, fullName: name.trim(), email: email.trim(), phone: phone.trim(),
+        ownerUid: credential.user.uid, fullName: name.trim(), email: email.trim(), phone: phone.trim(), photoURL: credential.user.photoURL || '',
         status: 'active', source: 'site', createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         termsVersion: 'V1', termsAcceptedAt: serverTimestamp(),
       });
       await batch.commit();
       setState({
         user: credential.user,
-        profile: { uid: credential.user.uid, email: email.trim(), displayName: name.trim(), role: 'client', active: true, artistId: credential.user.uid },
+        profile: { uid: credential.user.uid, email: email.trim(), displayName: name.trim(), role: 'client', active: true, photoURL: credential.user.photoURL || undefined, artistId: credential.user.uid },
         loading: false, error: null,
       });
       try { await sendEmailVerification(credential.user); } catch (error) { console.warn('Verification e-mail:', error); }
+      await notifyStudioEmail('welcome');
+    },
+    loginWithGoogle: async () => {
+      const { auth: firebaseAuth, db: firestore } = requireFirebase();
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const credential = await signInWithPopup(firebaseAuth, provider);
+      const account = credential.user;
+      const managerCandidate = String(account.email || '').toLowerCase() === 'exaucenapopolo2@gmail.com';
+      let token = await account.getIdTokenResult();
+      if (managerCandidate && token.claims.role !== 'manager') {
+        const response = await fetch('/api/studio', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + await account.getIdToken(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'bootstrapManager' }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.success) throw new Error(payload.error || 'Le compte manager ne peut pas être initialisé.');
+        token = await account.getIdTokenResult(true);
+      }
+      const userRef = doc(firestore, 'users', account.uid);
+      const snapshot = await getDoc(userRef);
+      const role: Role = token.claims.role === 'manager' || token.claims.role === 'producer' ? token.claims.role : 'client';
+      if (!snapshot.exists() && !managerCandidate) {
+        const name = account.displayName || (account.email || '').split('@')[0] || 'Artiste';
+        const batch = writeBatch(firestore);
+        batch.set(userRef, {
+          uid: account.uid, email: account.email || '', displayName: name, role, active: true,
+          artistId: role === 'client' ? account.uid : null, photoURL: account.photoURL || '',
+          createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        });
+        if (role === 'client') batch.set(doc(firestore, 'artists', account.uid), {
+          ownerUid: account.uid, fullName: name, email: account.email || '', phone: '',
+          photoURL: account.photoURL || '', status: 'active', source: 'site',
+          createdAt: serverTimestamp(), updatedAt: serverTimestamp(), termsVersion: 'V1', termsAcceptedAt: serverTimestamp(),
+        });
+        await batch.commit();
+        await notifyStudioEmail('welcome');
+      } else if (!managerCandidate && role === 'client') {
+        const artistRef = doc(firestore, 'artists', account.uid);
+        const artistSnapshot = await getDoc(artistRef);
+        if (!artistSnapshot.exists()) {
+          await setDoc(artistRef, {
+            ownerUid: account.uid, fullName: account.displayName || 'Artiste', email: account.email || '',
+            phone: '', photoURL: account.photoURL || '', status: 'active', source: 'site',
+            createdAt: serverTimestamp(), updatedAt: serverTimestamp(), termsVersion: 'V1', termsAcceptedAt: serverTimestamp(),
+          });
+        }
+      }
+      const latest = await getDoc(userRef);
+      const data = latest.exists() ? latest.data() : {};
+      setState({
+        user: account,
+        profile: {
+          uid: account.uid, email: account.email || '', displayName: account.displayName || String(data.displayName || ''),
+          role, active: managerCandidate || data.active === true,
+          photoURL: String(data.photoURL || account.photoURL || '') || undefined,
+          artistId: typeof data.artistId === 'string' ? data.artistId : (role === 'client' ? account.uid : undefined),
+          createdAt: data.createdAt,
+        },
+        loading: false, error: null,
+      });
     },
     logout: async () => {
       const { auth: firebaseAuth, db: firestore } = requireFirebase();

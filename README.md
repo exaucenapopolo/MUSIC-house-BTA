@@ -42,6 +42,50 @@ L'application affiche un écran de configuration explicite tant que Firebase n'e
 
 Les valeurs `apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId`, `appId` et `measurementId` sont la configuration publique de l'application Web Firebase déjà fournie. Ne placez jamais une clé privée de compte de service, un mot de passe ou un secret Admin SDK dans une variable `VITE_*` ou dans Git.
 
+## Cloudinary, Resend et connexion Google
+
+Les services de profil et de communication réutilisent les conventions déjà présentes dans le dépôt Pata.
+
+### Photos de profil Cloudinary
+
+- Cloud : `do83voiqy`
+- Preset unsigned : `afrikdigitalo_upload`
+- Dossier : `music-house-bta/avatars`
+- Taille maximale d'une photo : 5 Mo.
+- Variables publiques optionnelles : `VITE_CLOUDINARY_CLOUD_NAME` et `VITE_CLOUDINARY_UPLOAD_PRESET`.
+
+Le cloud et le preset ne sont pas des secrets. Le preset Cloudinary doit être de type unsigned. Le navigateur envoie la photo directement à Cloudinary ; seule l'URL HTTPS validée est ensuite enregistrée dans les profils Firestore de l'artiste et du compte utilisateur.
+
+### Emails automatiques avec Resend
+
+Configurez les variables suivantes dans Vercel côté serveur, jamais avec le préfixe `VITE_` :
+- `RESEND_API_KEY` : clé privée Resend.
+- `RESEND_FROM_EMAIL` : expéditeur appartenant à un domaine vérifié dans Resend.
+- `APP_URL` : URL HTTPS publique de MUSIC HOUSE BTA utilisée dans les liens des e-mails.
+
+Les événements suivants déclenchent des e-mails : création d'un compte artiste, demande de rendez-vous reçue, rendez-vous validé par le manager, demande de publication soumise, évolution du statut de publication et message direct envoyé par le manager à un artiste. Les e-mails sont envoyés par une fonction serveur ; la clé Resend n'est jamais transmise au navigateur.
+
+### Connexion Google et compte manager
+
+Activez le fournisseur **Google** dans Firebase Console → Authentication → Sign-in method, en conservant **Email/Password**. Ajoutez le domaine de production dans Authentication → Settings → Authorized domains.
+
+Le compte manager principal est `exaucenapopolo2@gmail.com`. À sa première connexion, l'API serveur attribue le custom claim `manager` après validation de l'adresse e-mail Firebase. Le compte doit exister dans Firebase Authentication et son adresse doit être vérifiée. La connexion Google fournit normalement une adresse déjà vérifiée.
+
+Le manager peut ensuite inviter des producteurs depuis **Équipe du studio**. Le serveur crée ou associe leur compte Firebase, attribue le rôle producteur et leur envoie un lien sécurisé pour définir leur mot de passe.
+
+### Variables serveur obligatoires dans Vercel
+
+```env
+RESEND_API_KEY=
+RESEND_FROM_EMAIL=
+FIREBASE_PROJECT_ID=music-house-bta
+FIREBASE_SERVICE_ACCOUNT_KEY=
+MUSIC_HOUSE_MANAGER_EMAIL=exaucenapopolo2@gmail.com
+APP_URL=https://votre-domaine.com
+```
+
+`FIREBASE_SERVICE_ACCOUNT_KEY` contient le JSON du compte de service du projet **music-house-bta**. Il doit provenir de ce projet Firebase, être conservé uniquement dans les variables serveur Vercel et ne jamais être ajouté au dépôt. Les clés du projet Pata ne doivent pas être utilisées pour administrer un autre projet Firebase.
+
 ## Configuration Firebase requise par le propriétaire
 
 1. Ouvrir le projet existant **`music-house-bta`** dans Firebase Console.
@@ -52,11 +96,11 @@ Les valeurs `apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSend
 6. Dans **Authentication → Settings → Authorized domains**, ajouter/vérifier le domaine réel de l'application.
 7. Pour les e-mails de vérification et de réinitialisation, configurer les modèles d'e-mail Firebase. App Check pourra être activé avant l'ouverture publique.
 
-Aucun identifiant de projet, domaine, compte manager, compte producteur, secret, numéro de téléphone ou paramètre de facturation n'est prédéfini dans le dépôt.
+L'adresse du manager principal est `exaucenapopolo2@gmail.com`. Les secrets Resend et Firebase Admin sont configurés exclusivement dans les variables serveur Vercel et ne sont pas enregistrés dans Git.
 
 ## Création des comptes et attribution des rôles
 
-Les deux comptes internes doivent d'abord exister dans Firebase Authentication. Le propriétaire crée les comptes manager et producteur (inscription via l'application ou depuis la console), puis attribue leurs rôles depuis un environnement d'administration de confiance.
+Le compte manager principal `exaucenapopolo2@gmail.com` doit exister dans Firebase Authentication et son adresse doit être vérifiée. À sa connexion, le serveur attribue automatiquement le rôle manager à cette adresse autorisée. Les comptes producteurs sont ensuite créés et invités depuis le module **Équipe du studio** ; le script Admin ci-dessous reste disponible pour une attribution manuelle exceptionnelle.
 
 Exemple avec Google Application Default Credentials :
 
@@ -130,7 +174,7 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 ## Limites V1 et décisions encore à fournir
 
 - L'identifiant du projet et la configuration Web sont fournis (`music-house-bta`). La région Firestore et le domaine public final doivent encore être confirmés par le propriétaire.
-- Les adresses e-mail des comptes manager et producteur sont à choisir par le propriétaire avant l'attribution des rôles.
+- Le compte manager principal est identifié par `exaucenapopolo2@gmail.com`. Les producteurs sont invités depuis le tableau de bord manager ou ajoutés manuellement avec le script Admin.
 - Le seuil de dépense exceptionnelle est configurable dans Paramètres. La valeur initiale est volontairement vide ; le manager doit la définir s'il souhaite un seuil numérique. Les dépenses explicitement marquées exceptionnelles exigent toujours les deux validations.
 - Les paiements sont saisis manuellement après vérification réelle des fonds. La V1 ne vérifie pas automatiquement les comptes Mobile Money ou bancaires.
 - Les conditions légales/texte contractuel final, logo officiel, coordonnées publiques, canaux de support et domaine définitif sont des éléments du propriétaire à renseigner avant ouverture publique.
