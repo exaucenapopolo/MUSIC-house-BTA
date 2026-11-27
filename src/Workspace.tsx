@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Activity, AlertCircle, Archive, ArrowDownRight, ArrowUpRight, AudioLines, Bell,
+  Activity, AlertCircle, Archive, ArrowDownRight, ArrowUpRight, AudioLines, Bell, Camera,
   CalendarDays, Check, CheckCircle2, CircleDollarSign, ClipboardList, Download,
   FileMusic, Filter, FolderKanban, Headphones, Home, LogOut, Menu, Music2, Plus,
-  Radio, Search, Settings, ShieldCheck, SlidersHorizontal, Sparkles, UserRound,
+  Mail, Radio, Search, Settings, ShieldCheck, SlidersHorizontal, Sparkles, UserPlus, UserRound,
   Users, Wallet, WifiOff, X,
 } from 'lucide-react';
 import {
@@ -12,6 +12,8 @@ import {
 } from 'firebase/firestore';
 import type { QueryConstraint } from 'firebase/firestore';
 import { useAuth } from './auth';
+import { uploadArtistAvatar } from './cloudinary';
+import { callStudioApi, notifyStudioEmail } from './studioApi';
 import { db, clearLocalFirestoreCache } from './firebase';
 import { useLiveCollection } from './hooks';
 import {
@@ -28,12 +30,13 @@ import {
   submitPaymentClaim, updateBusinessRates,
 } from './services';
 
- type SectionKey = 'dashboard' | 'artists' | 'appointments' | 'services' | 'projects' | 'payments' | 'expenses' | 'commissions' | 'distribution' | 'reports' | 'settings' | 'notifications' | 'profile' | 'calendar';
+ type SectionKey = 'dashboard' | 'artists' | 'team' | 'appointments' | 'services' | 'projects' | 'payments' | 'expenses' | 'commissions' | 'distribution' | 'reports' | 'settings' | 'notifications' | 'profile' | 'calendar';
  type NavItem = { key: SectionKey; label: string; icon: typeof Home; group?: string };
 
 const managerNav: NavItem[] = [
   { key: 'dashboard', label: 'Vue d’ensemble', icon: Home },
   { key: 'artists', label: 'Artistes & clients', icon: Users, group: 'STUDIO' },
+  { key: 'team', label: 'Équipe du studio', icon: UserPlus },
   { key: 'appointments', label: 'Rendez-vous', icon: CalendarDays },
   { key: 'services', label: 'Prestations & tarifs', icon: SlidersHorizontal },
   { key: 'projects', label: 'Projets musicaux', icon: FolderKanban },
@@ -44,6 +47,7 @@ const managerNav: NavItem[] = [
   { key: 'reports', label: 'Rapports', icon: ClipboardList },
   { key: 'settings', label: 'Paramètres', icon: Settings, group: 'SYSTÈME' },
   { key: 'notifications', label: 'Notifications', icon: Bell },
+  { key: 'profile', label: 'Mon profil', icon: UserRound },
 ];
 const producerNav: NavItem[] = [
   { key: 'dashboard', label: 'Vue d’ensemble', icon: Home },
@@ -54,6 +58,7 @@ const producerNav: NavItem[] = [
   { key: 'expenses', label: 'Dépenses à déclarer', icon: ArrowDownRight, group: 'SUIVI' },
   { key: 'commissions', label: 'Mon relevé', icon: Wallet },
   { key: 'notifications', label: 'Notifications', icon: Bell },
+  { key: 'profile', label: 'Mon profil', icon: UserRound },
 ];
 const clientNav: NavItem[] = [
   { key: 'dashboard', label: 'Mon accueil', icon: Home },
@@ -61,6 +66,7 @@ const clientNav: NavItem[] = [
   { key: 'services', label: 'Prestations', icon: SlidersHorizontal },
   { key: 'appointments', label: 'Mes rendez-vous', icon: CalendarDays },
   { key: 'projects', label: 'Mes projets', icon: FolderKanban },
+  { key: 'distribution', label: 'Demande de publication', icon: Radio },
   { key: 'payments', label: 'Mes paiements', icon: CircleDollarSign, group: 'SUIVI' },
   { key: 'notifications', label: 'Notifications', icon: Bell },
 ];
@@ -186,7 +192,8 @@ export default function Workspace() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [rates, setRates] = useState<RateSet | null>(null);
-  const [managerUsers, setManagerUsers] = useState<Array<{ uid: string; displayName: string; role: string; active: boolean }>>([]);
+  const [managerUsers, setManagerUsers] = useState<Array<{ uid: string; displayName: string; email: string; role: string; active: boolean; photoURL?: string }>>([]);
+  const [messageArtist, setMessageArtist] = useState<Artist | null>(null);
   const [myProfile, setMyProfile] = useState<Artist | null>(null);
   const [trustedDevice] = useState(() => typeof localStorage !== 'undefined' && localStorage.getItem('mhb_trusted_device') === 'yes');
   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
@@ -210,6 +217,7 @@ export default function Workspace() {
     if (role === 'manager') {
       setManagerUsers(data.users.rows.map((row) => ({
         uid: row.id, displayName: String(row.displayName || row.email || 'Utilisateur'),
+        email: String(row.email || ''), photoURL: String(row.photoURL || ''),
         role: String(row.role || 'client'), active: row.active === true,
       })));
     } else setManagerUsers([]);
@@ -298,6 +306,7 @@ export default function Workspace() {
       });
       if (assignedProducerUid) batch.update(doc(db!, 'artists', artist.id), { producerUids: arrayUnion(assignedProducerUid), updatedAt: serverTimestamp() });
       await batch.commit();
+      if (role === 'client') await notifyStudioEmail('appointmentRequested', { appointmentId: appointmentRef.id });
     }, role === 'client' ? 'Votre demande de rendez-vous a été envoyée.' : 'La demande de rendez-vous a été créée.');
   }
 
@@ -382,20 +391,41 @@ export default function Workspace() {
   async function createDistribution(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     await action(async () => {
-      const artist = data.artists.rows.find((row) => row.id === String(form.get('artistId')));
-      if (!artist) throw new Error('Sélectionnez un artiste.');
-      const price = Number(form.get('priceXaf'));
+      const artist = role === 'client' ? myProfile : data.artists.rows.find((row) => row.id === String(form.get('artistId')));
+      if (!artist) throw new Error('Complétez ou sélectionnez d’abord un profil artiste.');
+      const price = Number(form.get('priceXaf') || 0);
       if (!Number.isSafeInteger(price) || price < 0) throw new Error('Le tarif doit être un entier XAF.');
-      await addDoc(collection(db!, 'distributionOrders'), {
-        ownerUid: artist.ownerUid || 'manual', artistId: artist.id,
-        artistName: artist.stageName || artist.fullName,
+      const projectId = String(form.get('projectId') || '').trim();
+      const project = projectId ? data.projects.rows.find((row) => row.id === projectId) : null;
+      if (role === 'client' && project && (project.ownerUid !== uid || project.status !== 'completed')) throw new Error('Vous pouvez uniquement associer un projet terminé qui vous appartient.');
+      const orderRef = await addDoc(collection(db!, 'distributionOrders'), {
+        ownerUid: role === 'client' ? uid : (artist.ownerUid || 'manual'), artistId: artist.id,
+        artistName: artist.stageName || artist.fullName, projectId: project?.id || null,
         releaseTitle: String(form.get('releaseTitle') || '').trim(), releaseType: String(form.get('releaseType') || 'single'),
         distributor: String(form.get('distributor') || '').trim(), platforms: String(form.get('platforms') || '').trim(),
+        releaseUrl: String(form.get('releaseUrl') || '').trim(), releaseNotes: String(form.get('releaseNotes') || '').trim(),
         requestedReleaseDate: String(form.get('releaseDate') || '') || null,
-        priceXaf: price, status: 'draft', clientVisible: true,
+        priceXaf: price, status: role === 'client' ? 'submitted' : 'draft', clientVisible: true,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(), createdBy: uid,
       });
-    }, 'La commande de distribution a été créée.');
+      if (role === 'client') await notifyStudioEmail('distributionRequested', { orderId: orderRef.id });
+    }, role === 'client' ? 'Votre demande de publication a été transmise au manager.' : 'La commande de distribution a été créée.');
+  }
+
+  async function createProducer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    await action(async () => {
+      await callStudioApi('createProducer', { email: String(form.get('email') || '').trim(), displayName: String(form.get('displayName') || '').trim() });
+    }, 'Le compte producteur a été créé. Un e-mail sécurisé lui a été envoyé pour définir son mot de passe.');
+  }
+
+  async function sendArtistMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    if (!messageArtist) throw new Error('Sélectionnez un artiste.');
+    await action(async () => {
+      await callStudioApi('managerMessage', { artistId: messageArtist.id, subject: String(form.get('subject') || '').trim(), message: String(form.get('message') || '').trim() });
+    }, 'Votre e-mail a été envoyé à ' + (messageArtist.stageName || messageArtist.fullName) + '.');
+    setMessageArtist(null);
   }
 
   async function saveRates(event: FormEvent<HTMLFormElement>) {
@@ -513,13 +543,13 @@ export default function Workspace() {
       </nav>
       <div className="sidebar-bottom">
         <div className="help-box"><span className="help-icon"><Sparkles size={16} /></span><div><b>Besoin d’aide ?</b><p>Votre espace de travail est à jour.</p></div></div>
-        <div className="sidebar-user"><span className="avatar">{(profile?.displayName || 'M').slice(0, 1).toUpperCase()}</span><div className="user-meta"><b>{profile?.displayName || user?.email}</b><small>{ROLE_LABELS[role]}</small></div><button className="icon-button" onClick={doLogout} title="Se déconnecter"><LogOut size={16} /></button></div>
+        <div className="sidebar-user"><span className="avatar">{(role === 'client' ? myProfile?.photoURL : profile?.photoURL) ? <img src={(role === 'client' ? myProfile?.photoURL : profile?.photoURL) || ''} alt="" className="h-full w-full rounded-full object-cover" /> : (profile?.displayName || 'M').slice(0, 1).toUpperCase()}</span><div className="user-meta"><b>{profile?.displayName || user?.email}</b><small>{ROLE_LABELS[role]}</small></div><button className="icon-button" onClick={doLogout} title="Se déconnecter"><LogOut size={16} /></button></div>
       </div>
     </aside>
     {mobileMenu && <button className="mobile-scrim" onClick={() => setMobileMenu(false)} aria-label="Fermer le menu" />}
     <main className="main-area">
       <header className="topbar"><div className="topbar-left"><button className="mobile-menu-button icon-button" onClick={() => setMobileMenu(true)}><Menu size={20} /></button><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{nav.find((item) => item.key === section)?.label || 'Vue d’ensemble'}</strong></div></div>
-        <div className="topbar-right"><span className={`connection ${offline ? 'offline' : pendingWrites ? 'syncing' : ''}`}><i />{offline ? 'Hors connexion' : pendingWrites ? 'Synchronisation…' : 'En ligne'}</span><button className="topbar-notification icon-button" onClick={() => onNavigate('notifications')} title="Notifications"><Bell size={18} />{visibleNotifications > 0 && <i />}</button><div className="topbar-avatar">{(profile?.displayName || 'M').slice(0, 1).toUpperCase()}</div></div>
+        <div className="topbar-right"><span className={`connection ${offline ? 'offline' : pendingWrites ? 'syncing' : ''}`}><i />{offline ? 'Hors connexion' : pendingWrites ? 'Synchronisation…' : 'En ligne'}</span><button className="topbar-notification icon-button" onClick={() => onNavigate('notifications')} title="Notifications"><Bell size={18} />{visibleNotifications > 0 && <i />}</button><div className="topbar-avatar">{(role === 'client' ? myProfile?.photoURL : profile?.photoURL) ? <img src={(role === 'client' ? myProfile?.photoURL : profile?.photoURL) || ''} alt="" className="h-full w-full rounded-full object-cover" /> : (profile?.displayName || 'M').slice(0, 1).toUpperCase()}</div></div>
       </header>
       <section className="content-area">
         {!trustedDevice && <div className="privacy-banner"><ShieldCheck size={17} /><span><b>Appareil non approuvé.</b> Les données hors connexion restent en mémoire de session uniquement. Activez le cache persistant seulement sur un appareil personnel.</span><button onClick={() => { localStorage.setItem('mhb_trusted_device', 'yes'); window.location.reload(); }}>Faire confiance à cet appareil</button></div>}
@@ -528,18 +558,20 @@ export default function Workspace() {
         {notice && <div className={`toast ${notice.type}`}><span>{notice.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}{notice.message}</span><button className="icon-button" onClick={() => setNotice(null)}><X size={16} /></button></div>}
         {section !== 'dashboard' && section !== 'profile' && <div className="search-line"><div className="search-box"><Search size={17} /><input placeholder="Rechercher dans cette vue…" value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌘ K</kbd></div><button className="filter-button" onClick={() => setSearch('')}><Filter size={15} /> Réinitialiser</button></div>}
         {section === 'dashboard' && <Dashboard role={role} profileName={profile?.displayName || 'Artiste'} data={data} onNavigate={onNavigate} />}
-        {section === 'artists' && (role === 'manager' || role === 'producer') && <ArtistsPage rows={filtered(data.artists.rows)} readOnly={role === 'producer'} onAdd={() => setModal('artist')} onArchive={(row) => action(async () => { await updateDoc(doc(db!, 'artists', row.id), { status: row.status === 'archived' ? 'active' : 'archived', updatedAt: serverTimestamp() }); }, 'Le statut du profil a été modifié.')} />}
+        {section === 'artists' && (role === 'manager' || role === 'producer') && <ArtistsPage rows={filtered(data.artists.rows)} readOnly={role === 'producer'} onAdd={() => setModal('artist')} onMessage={(row) => { setMessageArtist(row); setModal('artist-message'); }} onArchive={(row) => action(async () => { await updateDoc(doc(db!, 'artists', row.id), { status: row.status === 'archived' ? 'active' : 'archived', updatedAt: serverTimestamp() }); }, 'Le statut du profil a été modifié.')} />}
+        {section === 'team' && role === 'manager' && <TeamPage rows={managerUsers} onAdd={() => setModal('producer')} />}
         {section === 'services' && <ServicesPage role={role} rows={filtered(data.services.rows)} onAdd={() => setModal('service')} onToggle={(row) => action(async () => { await updateDoc(doc(db!, 'services', row.id), { isActive: !row.isActive, updatedAt: serverTimestamp() }); }, 'Le catalogue a été mis à jour.')} />}
-        {(section === 'appointments' || section === 'calendar') && <AppointmentsPage role={role} rows={filtered(data.appointments.rows)} producers={managerUsers.filter((entry) => entry.role === 'producer' && entry.active)} onAdd={() => setModal('appointment')} onConfirm={(row, producerUid) => action(async () => { let waiver: string | undefined; if ((row.amountPaidXaf || 0) < (row.depositExpectedXaf || 0)) { waiver = window.prompt(`Acompte requis : ${formatXaf(row.depositExpectedXaf)} · déjà reçu : ${formatXaf(row.amountPaidXaf || 0)}. Motif obligatoire de la dérogation manager :`) || undefined; if (!waiver?.trim()) throw new Error('La confirmation a été annulée : l’acompte reste insuffisant.'); } const producer = managerUsers.find((entry) => entry.uid === producerUid && entry.role === 'producer' && entry.active); await confirmAppointment(db!, row.id, uid, waiver, producer ? { uid: producer.uid, name: producer.displayName } : undefined); }, 'Le créneau est confirmé et réservé.')} onCancel={(row) => action(() => cancelAppointment(db!, row.id), 'Le rendez-vous a été annulé et le créneau libéré.')} onReschedule={(row) => { const next = window.prompt('Nouvelle date et heure (heure de Douala), format AAAA-MM-JJTHH:MM :'); if (next) action(() => rescheduleAppointment(db!, row.id, next), 'Le rendez-vous a été déplacé. Une nouvelle confirmation du créneau est nécessaire.'); }} onProgress={(row, status) => action(() => updateAppointmentProgress(db!, row.id, status as 'in_progress' | 'completed'), status === 'completed' ? 'Séance terminée et créneau libéré.' : 'Séance démarrée.')} />}
+        {(section === 'appointments' || section === 'calendar') && <AppointmentsPage role={role} rows={filtered(data.appointments.rows)} producers={managerUsers.filter((entry) => entry.role === 'producer' && entry.active)} onAdd={() => setModal('appointment')} onConfirm={(row, producerUid) => action(async () => { let waiver: string | undefined; if ((row.amountPaidXaf || 0) < (row.depositExpectedXaf || 0)) { waiver = window.prompt(`Acompte requis : ${formatXaf(row.depositExpectedXaf)} · déjà reçu : ${formatXaf(row.amountPaidXaf || 0)}. Motif obligatoire de la dérogation manager :`) || undefined; if (!waiver?.trim()) throw new Error('La confirmation a été annulée : l’acompte reste insuffisant.'); } const producer = managerUsers.find((entry) => entry.uid === producerUid && entry.role === 'producer' && entry.active); await confirmAppointment(db!, row.id, uid, waiver, producer ? { uid: producer.uid, name: producer.displayName } : undefined); await notifyStudioEmail('appointmentConfirmed', { appointmentId: row.id }); }, 'Le créneau est confirmé et réservé.')} onCancel={(row) => action(() => cancelAppointment(db!, row.id), 'Le rendez-vous a été annulé et le créneau libéré.')} onReschedule={(row) => { const next = window.prompt('Nouvelle date et heure (heure de Douala), format AAAA-MM-JJTHH:MM :'); if (next) action(() => rescheduleAppointment(db!, row.id, next), 'Le rendez-vous a été déplacé. Une nouvelle confirmation du créneau est nécessaire.'); }} onProgress={(row, status) => action(() => updateAppointmentProgress(db!, row.id, status as 'in_progress' | 'completed'), status === 'completed' ? 'Séance terminée et créneau libéré.' : 'Séance démarrée.')} />}
         {section === 'projects' && <ProjectsPage role={role} rows={filtered(data.projects.rows)} onAdd={() => setModal('project')} onStep={updateStep} onNote={addProjectNote} />}
         {section === 'payments' && <PaymentsPage role={role} rows={filtered(data.payments.rows)} submissions={filtered(data.submissions.rows)} onAdd={() => setModal(role === 'client' ? 'payment-claim' : 'payment')} onProcess={handlePaymentSubmission} onReverse={reversePayment} />}
         {section === 'expenses' && role !== 'client' && <ExpensesPage role={role} rows={filtered(data.expenses.rows)} onAdd={() => setModal('expense')} onStatus={markExpense} />}
         {section === 'commissions' && <CommissionsPage role={role} rows={filtered(data.commissions.rows)} onPaid={markCommissionPaid} />}
-        {section === 'distribution' && role !== 'producer' && <DistributionPage role={role} rows={filtered(data.distribution.rows)} onAdd={() => setModal('distribution')} onStatus={(row, status) => action(async () => { await updateDoc(doc(db!, 'distributionOrders', row.id), { status, updatedAt: serverTimestamp(), updatedBy: uid }); }, 'Le statut de distribution a été mis à jour.')} />}
+        {section === 'distribution' && role !== 'producer' && <DistributionPage role={role} rows={filtered(data.distribution.rows)} onAdd={() => setModal('distribution')} onStatus={(row, status) => action(async () => { await updateDoc(doc(db!, 'distributionOrders', row.id), { status, updatedAt: serverTimestamp(), updatedBy: uid }); if (role === 'manager') await notifyStudioEmail('distributionStatus', { orderId: row.id, status }); }, 'Le statut de distribution a été mis à jour.')} />}
         {section === 'reports' && role === 'manager' && <ReportsPage data={data} />}
         {section === 'settings' && role === 'manager' && <SettingsPage rates={rates} onInitialize={() => action(async () => { await initializeBusinessSettings(db!, uid); setRates(await getRateSet(db!)); }, 'Les paramètres financiers par défaut ont été initialisés.')} onSave={saveRates} onClearCache={() => action(() => clearLocalFirestoreCache(), 'Le cache local a été effacé.')} />}
         {section === 'notifications' && <NotificationsPage rows={filtered(data.notifications.rows)} onRead={readNotification} />}
-        {section === 'profile' && role === 'client' && <ProfilePage profile={myProfile} onSaved={() => setNotice({ type: 'success', message: 'Votre profil artistique a été mis à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
+        {section === 'profile' && role === 'client' && <ProfilePage profile={myProfile} uid={uid} onSaved={() => setNotice({ type: 'success', message: 'Votre profil artistique a été mis à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
+        {section === 'profile' && role !== 'client' && <AccountProfilePage uid={uid} displayName={profile?.displayName || ''} email={profile?.email || ''} photoURL={profile?.photoURL || ''} onSaved={() => setNotice({ type: 'success', message: 'Votre photo de profil a été mise à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
         {section !== 'dashboard' && !nav.some((item) => item.key === section) && <EmptyState title="Page indisponible" text="Cette section n’est pas accessible avec votre rôle." action={<Button onClick={() => onNavigate('dashboard')}>Retour à l’accueil</Button>} />}
         <footer className="content-footer"><span>© 2026 MUSIC HOUSE BTA</span><span>Une plateforme pour <b>Young Forever Records</b></span><span>Fuseau horaire : Africa/Douala</span></footer>
       </section>
@@ -552,17 +584,30 @@ export default function Workspace() {
       {modal === 'payment' && <form className="form-grid" onSubmit={createPayment}><Field label="Projet lié"><SelectInput name="projectId"><option value="">Sans projet lié</option>{data.projects.rows.map((row) => <option key={row.id} value={row.id}>{row.title} · {row.artistName}</option>)}</SelectInput></Field><Field label="Rendez-vous lié (acompte / solde)"><SelectInput name="appointmentId"><option value="">Aucun</option>{data.appointments.rows.filter((row) => !['cancelled', 'no_show'].includes(row.status)).map((row) => <option key={row.id} value={row.id}>{row.artistName} · {row.serviceName} · {formatDate(row.startsAt)}</option>)}</SelectInput></Field><Field label="Artiste (si paiement sans projet / rendez-vous)"><SelectInput name="artistId"><option value="">Choisir un artiste</option>{data.artists.rows.map((row) => <option key={row.id} value={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field><Field label="Montant encaissé (FCFA)" required><TextInput name="amountXaf" type="number" min="1" step="1" required placeholder="25000" /></Field><Field label="Frais externes directs déductibles (FCFA)"><TextInput name="directCostsXaf" type="number" min="0" step="1" defaultValue="0" /></Field><Field label="Somme collectée pour un tiers (FCFA)"><TextInput name="thirdPartyAmountXaf" type="number" min="0" step="1" defaultValue="0" /></Field><Field label="Mode de paiement"><SelectInput name="method"><option value="cash">Espèces</option><option value="mtn_momo">MTN Mobile Money</option><option value="orange_money">Orange Money</option><option value="transfer">Virement</option><option value="other">Autre</option></SelectInput></Field><Field label="Type de répartition"><SelectInput name="splitType"><option value="studio">Prestation du studio</option><option value="distribution">Service de distribution</option></SelectInput></Field><div className="span-two"><Field label="Référence (facultatif)"><TextInput name="reference" placeholder="Référence du reçu ou de la transaction" /></Field></div><p className="form-hint span-two">Le paiement sera inscrit comme validé. Les commissions sont réparties sur le cumul encaissé de ce projet et de cette version tarifaire, pour que les arrondis restent cohérents lors des acomptes successifs.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Valider le paiement</Button></div></form>}
       {modal === 'payment-claim' && <form className="form-grid" onSubmit={async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await action(async () => { const project = data.projects.rows.find((row) => row.id === String(form.get('projectId'))); await submitPaymentClaim(db!, { ownerUid: uid, amountXaf: Number(form.get('amountXaf')), method: String(form.get('method') || 'other') as any, reference: String(form.get('reference') || '').trim(), note: String(form.get('note') || '').trim(), projectId: project?.id, appointmentId: String(form.get('appointmentId') || '') || undefined, splitType: 'studio' }); }, 'Votre déclaration de paiement a été envoyée au studio pour vérification.'); }}><Field label="Projet concerné"><SelectInput name="projectId"><option value="">Non précisé</option>{data.projects.rows.map((row) => <option value={row.id} key={row.id}>{row.title}</option>)}</SelectInput></Field><Field label="Montant payé (FCFA)" required><TextInput name="amountXaf" type="number" min="1" step="1" required /></Field><Field label="Mode de paiement"><SelectInput name="method"><option value="mtn_momo">MTN Mobile Money</option><option value="orange_money">Orange Money</option><option value="cash">Espèces</option><option value="transfer">Virement</option><option value="other">Autre</option></SelectInput></Field><Field label="Référence de paiement" required><TextInput name="reference" required placeholder="Référence ou identifiant de transaction" /></Field><div className="span-two"><Field label="Commentaire"><TextArea name="note" rows={2} /></Field></div><p className="form-hint span-two">Cette déclaration n’est pas un paiement validé. Le manager doit vérifier la réception des fonds avant de l’enregistrer.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Envoyer pour vérification</Button></div></form>}
       {modal === 'expense' && <form className="form-grid" onSubmit={createExpenseForm}><Field label="Libellé" required><TextInput name="label" required placeholder="Achat de câble audio" /></Field><Field label="Catégorie"><SelectInput name="category"><option>Matériel</option><option>Transport</option><option>Électricité</option><option>Entretien</option><option>Communication</option><option>Autre</option></SelectInput></Field><Field label="Montant (FCFA)" required><TextInput name="amountXaf" type="number" min="1" step="1" required /></Field><Field label="Traitement"><SelectInput name="treatment"><option value="general">Charge générale (réserve)</option><option value="direct">Frais directement liés à une prestation</option></SelectInput></Field><Field label="Projet lié (facultatif)"><SelectInput name="projectId"><option value="">Aucun</option>{data.projects.rows.map((row) => <option value={row.id} key={row.id}>{row.title}</option>)}</SelectInput></Field><label className="check-field"><input name="exceptional" type="checkbox" /> Dépense exceptionnelle / investissement</label><div className="span-two"><Field label="Motif / justificatif"><TextArea name="reason" rows={2} placeholder="Précisez la dépense et la référence du justificatif…" /></Field></div><p className="form-hint span-two">Les dépenses déclarées par le producteur restent à valider par le manager. Une dépense exceptionnelle ou supérieure au seuil exige une co-signature du manager et du producteur.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary">Déclarer la dépense</Button></div></form>}
-      {modal === 'distribution' && <form className="form-grid" onSubmit={createDistribution}><Field label="Artiste" required><SelectInput name="artistId" required><option value="">Choisir un artiste</option>{data.artists.rows.map((row) => <option value={row.id} key={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field><Field label="Titre de la sortie" required><TextInput name="releaseTitle" required placeholder="Titre du morceau / album" /></Field><Field label="Type de sortie"><SelectInput name="releaseType"><option value="single">Single</option><option value="ep">EP</option><option value="album">Album</option></SelectInput></Field><Field label="Distributeur"><TextInput name="distributor" placeholder="Nom du distributeur" /></Field><Field label="Tarif du service (FCFA)" required><TextInput name="priceXaf" type="number" min="0" step="1" required /></Field><Field label="Date souhaitée"><TextInput name="releaseDate" type="date" /></Field><div className="span-two"><Field label="Plateformes demandées"><TextArea name="platforms" rows={2} placeholder="Spotify, Apple Music, Deezer…" /></Field></div><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary">Créer la commande</Button></div></form>}
+      {modal === 'distribution' && role === 'client' && <form className="form-grid" onSubmit={createDistribution}>
+        <Field label="Morceau / projet terminé (facultatif)"><SelectInput name="projectId"><option value="">Ne pas associer de projet</option>{data.projects.rows.filter((row) => row.status === 'completed').map((row) => <option value={row.id} key={row.id}>{row.title}</option>)}</SelectInput></Field>
+        <Field label="Titre du morceau" required><TextInput name="releaseTitle" required placeholder="Titre exact du morceau" /></Field>
+        <Field label="Format de sortie"><SelectInput name="releaseType"><option value="single">Single</option><option value="ep">EP</option><option value="album">Album</option></SelectInput></Field>
+        <Field label="Date de sortie souhaitée"><TextInput name="releaseDate" type="date" /></Field>
+        <div className="span-two"><Field label="Lien d’écoute ou de téléchargement"><TextInput name="releaseUrl" type="url" placeholder="https://…" /></Field></div>
+        <div className="span-two"><Field label="Plateformes souhaitées"><TextArea name="platforms" rows={2} placeholder="Spotify, Apple Music, Deezer, YouTube Music…" /></Field></div>
+        <div className="span-two"><Field label="Informations complémentaires"><TextArea name="releaseNotes" rows={3} placeholder="Précisez les informations utiles pour la publication : version finale, featuring, nom d’artiste, crédits…" /></Field></div>
+        <p className="form-hint span-two">Votre demande sera envoyée au manager. Le morceau ne sera pas publié automatiquement : le studio vérifiera les éléments et vous informera par e-mail de chaque évolution.</p>
+        <div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Envoyer au manager</Button></div>
+      </form>}
+      {modal === 'distribution' && role === 'manager' && <form className="form-grid" onSubmit={createDistribution}><Field label="Artiste" required><SelectInput name="artistId" required><option value="">Choisir un artiste</option>{data.artists.rows.map((row) => <option value={row.id} key={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field><Field label="Titre de la sortie" required><TextInput name="releaseTitle" required placeholder="Titre du morceau / album" /></Field><Field label="Type de sortie"><SelectInput name="releaseType"><option value="single">Single</option><option value="ep">EP</option><option value="album">Album</option></SelectInput></Field><Field label="Distributeur"><TextInput name="distributor" placeholder="Nom du distributeur" /></Field><Field label="Tarif du service (FCFA)" required><TextInput name="priceXaf" type="number" min="0" step="1" required /></Field><Field label="Date souhaitée"><TextInput name="releaseDate" type="date" /></Field><div className="span-two"><Field label="Plateformes demandées"><TextArea name="platforms" rows={2} placeholder="Spotify, Apple Music, Deezer…" /></Field><Field label="Lien du morceau"><TextInput name="releaseUrl" type="url" placeholder="https://…" /></Field><Field label="Notes"><TextArea name="releaseNotes" rows={2} /></Field></div><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary">Créer la commande</Button></div></form>}
+      {modal === 'producer' && <form className="form-grid" onSubmit={createProducer}><Field label="Nom complet" required><TextInput name="displayName" required minLength={2} placeholder="Nom du producteur" /></Field><Field label="Adresse e-mail" required><TextInput name="email" type="email" required placeholder="producteur@exemple.com" /></Field><p className="form-hint span-two">Un compte Firebase sera créé ou associé à cette adresse. Le producteur recevra un e-mail sécurisé lui permettant de définir son mot de passe et d’accéder à son tableau de bord.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? 'Création…' : 'Créer le compte producteur'}</Button></div></form>}
+      {modal === 'artist-message' && messageArtist && <form className="form-grid" onSubmit={sendArtistMessage}><div className="span-two"><p className="small-note">Destinataire : <b>{messageArtist.stageName || messageArtist.fullName}</b> · {messageArtist.email}</p></div><div className="span-two"><Field label="Objet de l’e-mail" required><TextInput name="subject" required maxLength={160} placeholder="Suivi de votre projet musical" /></Field></div><div className="span-two"><Field label="Message" required><TextArea name="message" required rows={7} placeholder="Rédigez votre message à l’artiste…" /></Field></div><div className="modal-actions span-two"><Button onClick={() => { setModal(null); setMessageArtist(null); }}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? 'Envoi…' : 'Envoyer l’e-mail'}</Button></div></form>}
     </Modal>}
   </div>;
 }
 
 function modalTitle(key: string): string {
-  const titles: Record<string, string> = { artist: 'Nouveau profil artiste', service: 'Ajouter une prestation', appointment: 'Nouvelle demande de rendez-vous', project: 'Créer un projet musical', payment: 'Enregistrer un paiement', 'payment-claim': 'Déclarer un paiement', expense: 'Nouvelle dépense', distribution: 'Nouvelle commande de distribution' };
+  const titles: Record<string, string> = { artist: 'Nouveau profil artiste', producer: 'Ajouter un producteur', 'artist-message': 'Écrire à un artiste', service: 'Ajouter une prestation', appointment: 'Nouvelle demande de rendez-vous', project: 'Créer un projet musical', payment: 'Enregistrer un paiement', 'payment-claim': 'Déclarer un paiement', expense: 'Nouvelle dépense', distribution: 'Demande de publication / nouvelle distribution' };
   return titles[key] || 'Nouvel enregistrement';
 }
 function modalDescription(key: string): string {
-  const descriptions: Record<string, string> = { artist: 'Ajoutez un artiste rencontré au studio, même sans compte en ligne.', service: 'Le tarif sera conservé comme instantané dans les commandes futures.', appointment: 'Les demandes sont vérifiées par le manager avant réservation définitive.', project: 'Définissez le responsable et les étapes de production par défaut.', payment: 'Seuls les fonds réellement reçus et vérifiés doivent être enregistrés ici.', 'payment-claim': 'Le studio vérifiera la réception des fonds avant validation.', expense: 'Les écritures restent dans le journal et leur statut est suivi.', distribution: 'Suivez le traitement manuel de la sortie, sans connexion automatique aux plateformes.' };
+  const descriptions: Record<string, string> = { artist: 'Ajoutez un artiste rencontré au studio, même sans compte en ligne.', producer: 'Invitez un membre de l’équipe. Il définira son mot de passe depuis le lien reçu par e-mail.', 'artist-message': 'Envoyez un message individuel depuis l’adresse officielle du studio.', service: 'Le tarif sera conservé comme instantané dans les commandes futures.', appointment: 'Les demandes sont vérifiées par le manager avant réservation définitive.', project: 'Définissez le responsable et les étapes de production par défaut.', payment: 'Seuls les fonds réellement reçus et vérifiés doivent être enregistrés ici.', 'payment-claim': 'Le studio vérifiera la réception des fonds avant validation.', expense: 'Les écritures restent dans le journal et leur statut est suivi.', distribution: 'Recevez ou créez une demande de distribution et suivez sa validation par le studio.' };
   return descriptions[key] || '';
 }
 
@@ -608,9 +653,17 @@ function Dashboard({ role, profileName, data, onNavigate }: { role: string; prof
   </>;
 }
 
-function ArtistsPage({ rows, onAdd, onArchive, readOnly = false }: { rows: Artist[]; onAdd: () => void; onArchive: (row: Artist) => void; readOnly?: boolean }) {
-  return <><PageHeader eyebrow="RÉPERTOIRE" title="Artistes & clients" subtitle={readOnly ? 'Les artistes associés à vos séances et productions.' : 'Les profils du studio, les informations de contact et l’historique de suivi.'} action={!readOnly ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Ajouter un artiste</Button> : undefined} />
-    <div className="table-panel"><div className="table-head"><b>{rows.length} profils chargés</b><span>Les profils archivés restent consultables.</span></div><div className="table-scroll"><table><thead><tr><th>ARTISTE</th><th>CONTACT</th><th>SPÉCIALITÉ</th><th>ORIGINE</th><th>STATUT</th>{!readOnly && <th></th>}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><div className="person-cell"><span className="avatar pale">{(row.stageName || row.fullName).slice(0, 1).toUpperCase()}</span><div><b>{row.stageName || row.fullName}</b><small>{row.fullName}</small></div></div></td><td><span>{row.email || '—'}</span><small className="table-sub">{row.phone || '—'}</small></td><td>{row.genre || 'Non renseigné'}</td><td>{row.source === 'site' ? 'Inscription en ligne' : 'Ajout manuel'}</td><td><StatusPill value={row.status || 'active'} /></td>{!readOnly && <td><button className="icon-button" title={row.status === 'archived' ? 'Réactiver' : 'Archiver'} onClick={() => onArchive(row)}><Archive size={16} /></button></td>}</tr>)}</tbody></table></div>{!rows.length && <EmptyState title="Aucun profil pour le moment" text="Ajoutez les artistes rencontrés au studio ou attendez les premières inscriptions." />}</div>
+function ArtistsPage({ rows, onAdd, onArchive, onMessage, readOnly = false }: { rows: Artist[]; onAdd: () => void; onArchive: (row: Artist) => void; onMessage?: (row: Artist) => void; readOnly?: boolean }) {
+  return <><PageHeader eyebrow="RÉPERTOIRE" title="Artistes & clients" subtitle={readOnly ? 'Les artistes associés à vos séances et productions.' : 'Les profils du studio, les photos, les contacts et les actions de suivi.'} action={!readOnly ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Ajouter un artiste</Button> : undefined} />
+    <div className="table-panel"><div className="table-head"><b>{rows.length} profils chargés</b><span>Les profils archivés restent consultables · photos synchronisées depuis Cloudinary.</span></div><div className="table-scroll"><table><thead><tr><th>ARTISTE</th><th>CONTACT</th><th>SPÉCIALITÉ</th><th>ORIGINE</th><th>STATUT</th>{!readOnly && <th>ACTIONS</th>}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><div className="person-cell"><span className="avatar pale">{row.photoURL ? <img src={row.photoURL} alt="" className="h-full w-full rounded-full object-cover" referrerPolicy="no-referrer" /> : (row.stageName || row.fullName).slice(0, 1).toUpperCase()}</span><div><b>{row.stageName || row.fullName}</b><small>{row.fullName}</small></div></div></td><td><span>{row.email || '—'}</span><small className="table-sub">{row.phone || '—'}</small></td><td>{row.genre || 'Non renseigné'}</td><td>{row.source === 'site' ? 'Inscription en ligne' : 'Ajout manuel'}</td><td><StatusPill value={row.status || 'active'} /></td>{!readOnly && <td><div className="row-actions">{onMessage && <button className="icon-button" title="Envoyer un e-mail à cet artiste" onClick={() => onMessage(row)} disabled={!row.email}><Mail size={16} /></button>}<button className="icon-button" title={row.status === 'archived' ? 'Réactiver' : 'Archiver'} onClick={() => onArchive(row)}><Archive size={16} /></button></div></td>}</tr>)}</tbody></table></div>{!rows.length && <EmptyState title="Aucun profil pour le moment" text="Ajoutez les artistes rencontrés au studio ou attendez les premières inscriptions." />}</div>
+  </>;
+}
+
+function TeamPage({ rows, onAdd }: { rows: Array<{ uid: string; displayName: string; email: string; role: string; active: boolean; photoURL?: string }>; onAdd: () => void }) {
+  const members = rows.filter((row) => row.role === 'manager' || row.role === 'producer');
+  return <><PageHeader eyebrow="ORGANISATION DU STUDIO" title="Équipe du studio" subtitle="Gérez les accès de l’équipe. Le manager principal conserve tous les droits et peut inviter de nouveaux producteurs." action={<Button variant="primary" onClick={onAdd}><UserPlus size={16} /> Ajouter un producteur</Button>} />
+    <div className="table-panel"><div className="table-head"><b>{members.length} membres internes</b><span>Les artistes et clients ne figurent pas dans cette liste.</span></div><div className="table-scroll"><table><thead><tr><th>MEMBRE</th><th>ADRESSE E-MAIL</th><th>FONCTION</th><th>ACCÈS</th></tr></thead><tbody>{members.map((row) => <tr key={row.uid}><td><div className="person-cell"><span className="avatar pale">{row.photoURL ? <img src={row.photoURL} alt="" className="h-full w-full rounded-full object-cover" /> : row.displayName.slice(0, 1).toUpperCase()}</span><div><b>{row.displayName}</b><small>{row.uid.slice(0, 10)}…</small></div></div></td><td>{row.email || '—'}</td><td>{row.role === 'manager' ? 'Manager' : 'Producteur'}</td><td><StatusPill value={row.active ? 'active' : 'archived'} /></td></tr>)}</tbody></table></div>{!members.length && <EmptyState title="Aucun membre interne trouvé" text="Le compte manager et les comptes producteurs actifs apparaîtront ici." />}</div>
+    <div className="report-note"><ShieldCheck size={17} /><p>Les invitations créent un compte Firebase et attribuent le rôle producteur côté serveur. Le membre reçoit un lien personnel pour définir son mot de passe. Seul le manager peut effectuer cette opération.</p></div>
   </>;
 }
 
@@ -674,8 +727,9 @@ function CommissionsPage({ role, rows, onPaid }: { role: string; rows: Commissio
 
 function DistributionPage({ role, rows, onAdd, onStatus }: { role: string; rows: any[]; onAdd: () => void; onStatus: (row: any, status: string) => void }) {
   const statuses = ['draft', 'ready', 'submitted', 'checking', 'accepted', 'published', 'rejected', 'withdrawn'];
-  return <><PageHeader eyebrow="DISTRIBUTION NUMÉRIQUE" title="Suivi des sorties" subtitle="Registre des demandes, métadonnées et statuts de distribution. La publication est confirmée manuellement." action={role === 'manager' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Nouvelle distribution</Button> : undefined} />
-    <div className="table-panel"><div className="table-head"><b>{rows.length} commandes chargées</b><span>Les redevances de plateformes ne sont pas suivies ici.</span></div><div className="table-scroll"><table><thead><tr><th>ARTISTE</th><th>SORTIE</th><th>TYPE</th><th>DISTRIBUTEUR</th><th>TARIF DU SERVICE</th><th>STATUT</th><th></th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.artistName}</td><td><b>{row.releaseTitle}</b><small className="table-sub">{row.platforms || 'Plateformes à préciser'}</small></td><td>{row.releaseType}</td><td>{row.distributor || '—'}</td><td>{formatXaf(row.priceXaf || 0)}</td><td><StatusPill value={row.status} /></td><td>{role === 'manager' && <select className="mini-select" value={row.status} onChange={(e) => onStatus(row, e.target.value)}>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select>}</td></tr>)}</tbody></table></div>{!rows.length && <EmptyState title="Aucune sortie à suivre" text="Les commandes de distribution apparaîtront ici une fois créées." />}</div>
+  const canRequest = role === 'client';
+  return <><PageHeader eyebrow="DISTRIBUTION NUMÉRIQUE" title={canRequest ? 'Demande de publication' : 'Suivi des sorties'} subtitle={canRequest ? 'Votre morceau est terminé ? Transmettez au studio les informations nécessaires pour étudier sa publication.' : 'Registre des demandes, métadonnées et statuts de distribution. La publication est confirmée manuellement.'} action={(role === 'manager' || canRequest) ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> {canRequest ? 'Demander une publication' : 'Nouvelle distribution'}</Button> : undefined} />
+    <div className="table-panel"><div className="table-head"><b>{rows.length} demandes / sorties chargées</b><span>Les redevances des plateformes ne sont pas suivies ici.</span></div><div className="table-scroll"><table><thead><tr><th>ARTISTE</th><th>MORCEAU / SORTIE</th><th>TYPE</th><th>PLATEFORMES</th><th>DATE SOUHAITÉE</th><th>STATUT</th><th></th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.artistName}</td><td><b>{row.releaseTitle}</b>{row.releaseUrl && <small className="table-sub"><a href={row.releaseUrl} target="_blank" rel="noreferrer">Écouter / consulter le lien ↗</a></small>}</td><td>{row.releaseType}</td><td>{row.platforms || 'À préciser'}</td><td>{row.requestedReleaseDate || '—'}</td><td><StatusPill value={row.status} /></td><td>{role === 'manager' && <select className="mini-select" value={row.status} onChange={(e) => onStatus(row, e.target.value)}>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select>}</td></tr>)}</tbody></table></div>{!rows.length && <EmptyState title={canRequest ? 'Aucune demande de publication' : 'Aucune sortie à suivre'} text={canRequest ? 'Lorsque votre morceau est prêt, envoyez une demande au manager depuis ce module.' : 'Les commandes et demandes de distribution apparaîtront ici.'} />}</div>
   </>;
 }
 
@@ -713,7 +767,9 @@ function NotificationsPage({ rows, onRead }: { rows: NotificationItem[]; onRead:
   </>;
 }
 
-function ProfilePage({ profile, onSaved, onError }: { profile: Artist | null; onSaved: () => void; onError: (message: string) => void }) {
+function ProfilePage({ profile, uid, onSaved, onError }: { profile: Artist | null; uid: string; onSaved: () => void; onError: (message: string) => void }) {
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoInput = useRef<HTMLInputElement>(null);
   if (!profile) return <EmptyState title="Votre profil artistique n’est pas encore disponible" text="Reconnectez-vous. Si le problème persiste, contactez le manager du studio." />;
   const artistProfile = profile;
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -728,8 +784,67 @@ function ProfilePage({ profile, onSaved, onError }: { profile: Artist | null; on
       onSaved();
     } catch (error) { onError(error instanceof Error ? error.message : 'Mise à jour impossible.'); }
   }
+  async function changePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setPhotoBusy(true);
+    try {
+      const photoURL = await uploadArtistAvatar(file);
+      await Promise.all([
+        updateDoc(doc(db!, 'artists', artistProfile.id), { photoURL, updatedAt: serverTimestamp() }),
+        updateDoc(doc(db!, 'users', uid), { photoURL, updatedAt: serverTimestamp() }),
+      ]);
+      onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'La photo de profil n’a pas pu être mise à jour.');
+    } finally { setPhotoBusy(false); }
+  }
   return <><PageHeader eyebrow="VOTRE IDENTITÉ ARTISTIQUE" title="Mon profil" subtitle="Gardez vos informations personnelles et artistiques à jour pour faciliter le suivi de vos projets." />
-    <form className="profile-form panel" onSubmit={save}><div className="profile-card-heading"><span className="profile-avatar"><UserRound size={26} /></span><div><h3>{profile.stageName || profile.fullName}</h3><p>{profile.email || 'E-mail non renseigné'} · Compte client</p></div></div><div className="form-grid"><Field label="Nom et prénom" required><TextInput name="fullName" defaultValue={profile.fullName} required /></Field><Field label="Nom de scène"><TextInput name="stageName" defaultValue={profile.stageName || ''} /></Field><Field label="Téléphone"><TextInput name="phone" defaultValue={profile.phone || ''} /></Field><Field label="Ville"><TextInput name="city" defaultValue={profile.city || ''} /></Field><Field label="Genre musical"><TextInput name="genre" defaultValue={profile.genre || ''} /></Field><div className="span-two"><Field label="Présentation"><TextArea name="bio" defaultValue={profile.bio || ''} rows={4} /></Field></div><div className="span-two modal-actions"><Button variant="primary" type="submit">Enregistrer mon profil</Button></div></div></form>
+    <form className="profile-form panel" onSubmit={save}>
+      <div className="profile-card-heading">
+        <button className="profile-avatar avatar-photo-button" type="button" onClick={() => photoInput.current?.click()} disabled={photoBusy} title="Changer ma photo de profil">
+          {profile.photoURL ? <img src={profile.photoURL} alt="" className="h-full w-full rounded-full object-cover" referrerPolicy="no-referrer" /> : <UserRound size={26} />}
+          <span className="avatar-camera"><Camera size={13} /></span>
+        </button>
+        <input ref={photoInput} type="file" accept="image/*" className="sr-only" onChange={changePhoto} />
+        <div><h3>{profile.stageName || profile.fullName}</h3><p>{profile.email || 'E-mail non renseigné'} · Compte artiste</p><small>{photoBusy ? 'Téléversement de la photo…' : 'Cliquez sur la photo pour la modifier · 5 Mo maximum'}</small></div>
+      </div>
+      <div className="form-grid"><Field label="Nom et prénom" required><TextInput name="fullName" defaultValue={profile.fullName} required /></Field><Field label="Nom de scène"><TextInput name="stageName" defaultValue={profile.stageName || ''} /></Field><Field label="Téléphone"><TextInput name="phone" defaultValue={profile.phone || ''} /></Field><Field label="Ville"><TextInput name="city" defaultValue={profile.city || ''} /></Field><Field label="Genre musical"><TextInput name="genre" defaultValue={profile.genre || ''} /></Field><div className="span-two"><Field label="Présentation"><TextArea name="bio" defaultValue={profile.bio || ''} rows={4} /></Field></div><div className="span-two modal-actions"><Button variant="primary" type="submit">Enregistrer mon profil</Button></div></div>
+    </form>
+  </>;
+}
+
+function AccountProfilePage({ uid, displayName, email, photoURL, onSaved, onError }: { uid: string; displayName: string; email: string; photoURL: string; onSaved: () => void; onError: (message: string) => void }) {
+  const [currentPhoto, setCurrentPhoto] = useState(photoURL);
+  const [uploading, setUploading] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  async function changePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setUploading(true);
+    try {
+      const nextPhoto = await uploadArtistAvatar(file);
+      await updateDoc(doc(db!, 'users', uid), { photoURL: nextPhoto, updatedAt: serverTimestamp() });
+      setCurrentPhoto(nextPhoto);
+      onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'La photo de profil n’a pas pu être mise à jour.');
+    } finally { setUploading(false); }
+  }
+  return <><PageHeader eyebrow="COMPTE DE L’ÉQUIPE" title="Mon profil" subtitle="Gérez votre identité visuelle dans l’espace du studio." />
+    <section className="profile-form panel">
+      <div className="profile-card-heading">
+        <button className="profile-avatar avatar-photo-button" type="button" onClick={() => fileInput.current?.click()} disabled={uploading} title="Changer ma photo de profil">
+          {currentPhoto ? <img src={currentPhoto} alt="" className="h-full w-full rounded-full object-cover" referrerPolicy="no-referrer" /> : <UserRound size={26} />}
+          <span className="avatar-camera"><Camera size={13} /></span>
+        </button>
+        <input ref={fileInput} type="file" accept="image/*" className="sr-only" onChange={changePhoto} />
+        <div><h3>{displayName || 'Membre de l’équipe'}</h3><p>{email} · Compte interne</p><small>{uploading ? 'Téléversement de la photo…' : 'Cliquez sur la photo pour la modifier · 5 Mo maximum'}</small></div>
+      </div>
+      <p className="small-note">La même photo apparaît dans le menu de votre compte et dans la liste des membres de l’équipe visible par le manager.</p>
+    </section>
   </>;
 }
 

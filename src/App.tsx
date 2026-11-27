@@ -33,7 +33,7 @@ function FirebaseNotice() {
 }
 
 function LoginPage() {
-  const { login } = useAuth();
+  const { login, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -60,12 +60,19 @@ function LoginPage() {
       {error && <div className="alert error">{error}</div>}
       <button className="button primary full" disabled={busy}>{busy ? 'Connexion…' : 'Se connecter'} <span>→</span></button>
     </form>
+    <div className="auth-divider"><span>ou</span></div>
+    <button className="button secondary full google-auth-button" type="button" disabled={busy} onClick={async () => {
+      setBusy(true); setError('');
+      try { await loginWithGoogle(); navigate('/'); }
+      catch (e) { setError(e instanceof Error ? e.message : 'Connexion Google impossible.'); }
+      finally { setBusy(false); }
+    }}><span className="google-mark">G</span> Continuer avec Google</button>
     <div className="auth-bottom">Vous n’avez pas encore de compte ? <Link to="/register">Rejoindre le studio</Link></div>
   </div></AuthFrame>;
 }
 
 function RegisterPage() {
-  const { register } = useAuth();
+  const { register, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
   const [name, setName] = useState(''); const [email, setEmail] = useState('');
   const [phone, setPhone] = useState(''); const [password, setPassword] = useState('');
@@ -90,6 +97,13 @@ function RegisterPage() {
       {error && <div className="alert error">{error}</div>}
       <button className="button primary full" disabled={busy}>{busy ? 'Création du compte…' : 'Créer mon compte'} <span>→</span></button>
     </form>
+    <div className="auth-divider"><span>ou</span></div>
+    <button className="button secondary full google-auth-button" type="button" disabled={busy} onClick={async () => {
+      setBusy(true); setError('');
+      try { await loginWithGoogle(); navigate('/'); }
+      catch (e) { setError(e instanceof Error ? e.message : 'Inscription Google impossible.'); }
+      finally { setBusy(false); }
+    }}><span className="google-mark">G</span> S’inscrire avec Google</button>
   </div></AuthFrame>;
 }
 

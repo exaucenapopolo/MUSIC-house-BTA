@@ -14,6 +14,7 @@ export interface UserProfile {
   displayName: string;
   role: Role;
   active: boolean;
+  photoURL?: string;
   artistId?: string;
   createdAt?: Timestamp;
 }
@@ -28,6 +29,7 @@ export interface Artist {
   city?: string;
   genre?: string;
   bio?: string;
+  photoURL?: string;
   socials?: string[];
   producerUids?: string[];
   status?: 'active' | 'archived';
