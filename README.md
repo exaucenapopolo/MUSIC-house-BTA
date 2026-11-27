@@ -20,7 +20,7 @@ La V1 n'active aucune passerelle de paiement, intégration automatique de platef
 ## Prérequis
 
 - Node.js 22 ou version ultérieure et npm.
-- Un projet Firebase dédié à MUSIC HOUSE BTA.
+- L'accès propriétaire au projet Firebase existant `music-house-bta` pour activer les services et déployer les règles.
 - Java 21 pour les tests avec l'émulateur Firestore.
 - Firebase CLI pour les émulateurs et le déploiement : `npm install -g firebase-tools` (ou utilisez la dépendance locale du projet avec `npx firebase`).
 
@@ -40,17 +40,17 @@ Copy-Item .env.example .env
 
 L'application affiche un écran de configuration explicite tant que Firebase n'est pas configuré. Renseignez ensuite les six variables `VITE_FIREBASE_*` dans `.env` avec les valeurs de **Firebase Console → Project settings → Your apps → Web app config**. `VITE_APP_URL` est facultative et sert uniquement de référence d'URL publique.
 
-Les valeurs `apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId` et `appId` sont la configuration publique de l'application Web Firebase. Ne placez jamais une clé privée de compte de service, un mot de passe ou un secret Admin SDK dans une variable `VITE_*` ou dans Git.
+Les valeurs `apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId`, `appId` et `measurementId` sont la configuration publique de l'application Web Firebase déjà fournie. Ne placez jamais une clé privée de compte de service, un mot de passe ou un secret Admin SDK dans une variable `VITE_*` ou dans Git.
 
 ## Configuration Firebase requise par le propriétaire
 
-1. Créer ou sélectionner le projet Firebase dédié et enregistrer une application Web.
-2. Dans **Authentication → Sign-in method**, activer **Email/Password**.
-3. Dans **Firestore Database**, créer la base en choisissant la région adaptée au projet. Le choix de région est une décision du propriétaire et n'est pas présupposé ici.
-4. Copier les six valeurs de configuration Web dans `.env` localement et dans les variables d'environnement du service d'hébergement choisi.
+1. Ouvrir le projet existant **`music-house-bta`** dans Firebase Console.
+2. Dans **Authentication → Sign-in method**, activer **Email/Password**. C'est indispensable pour que les formulaires d'inscription et de connexion puissent créer puis authentifier les comptes.
+3. Dans **Firestore Database**, vérifier que la base native existe. Si elle n'existe pas, la créer et choisir sa région (ce choix doit être confirmé par le propriétaire).
+4. La configuration Web fournie est déjà intégrée par défaut et dans `.env.example`. Aucune clé privée n'est requise dans le navigateur.
 5. Déployer les règles et index avec les commandes ci-dessous. Attendre la construction des index avant les tests fonctionnels dépendant de ceux-ci.
-6. Pour les e-mails de vérification et de réinitialisation, configurer le modèle et les domaines autorisés dans Firebase Authentication.
-7. Après la mise en place du domaine de production, activer et configurer Firebase App Check selon le fournisseur choisi. App Check n'est pas activé automatiquement par cette V1.
+6. Dans **Authentication → Settings → Authorized domains**, ajouter/vérifier le domaine réel de l'application.
+7. Pour les e-mails de vérification et de réinitialisation, configurer les modèles d'e-mail Firebase. App Check pourra être activé avant l'ouverture publique.
 
 Aucun identifiant de projet, domaine, compte manager, compte producteur, secret, numéro de téléphone ou paramètre de facturation n'est prédéfini dans le dépôt.
 
@@ -62,7 +62,7 @@ Exemple avec Google Application Default Credentials :
 
 ```powershell
  gcloud auth application-default login
- $env:FIREBASE_PROJECT_ID = "IDENTIFIANT_REEL_DU_PROJET"
+ $env:FIREBASE_PROJECT_ID = "music-house-bta"
  npm run set:role -- manager@votre-domaine.example manager
  npm run set:role -- producteur@votre-domaine.example producer
 ```
@@ -129,7 +129,7 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 
 ## Limites V1 et décisions encore à fournir
 
-- Les détails réels du projet Firebase (ID, région, domaine, configuration Web) sont à fournir par le propriétaire ; aucune valeur fictive n'est injectée.
+- L'identifiant du projet et la configuration Web sont fournis (`music-house-bta`). La région Firestore et le domaine public final doivent encore être confirmés par le propriétaire.
 - Les adresses e-mail des comptes manager et producteur sont à choisir par le propriétaire avant l'attribution des rôles.
 - Le seuil de dépense exceptionnelle est configurable dans Paramètres. La valeur initiale est volontairement vide ; le manager doit la définir s'il souhaite un seuil numérique. Les dépenses explicitement marquées exceptionnelles exigent toujours les deux validations.
 - Les paiements sont saisis manuellement après vérification réelle des fonds. La V1 ne vérifie pas automatiquement les comptes Mobile Money ou bancaires.
@@ -142,7 +142,7 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 - `firestore.indexes.json` : index composites utilisés par les requêtes.
 - `scripts/set-role.ts` : attribution sécurisée des rôles via Admin SDK.
 - `tests/` : tests financiers et tests de règles via Firebase Emulator.
-- `.env.example` : modèle sans identifiants réels.
+- `.env.example` : configuration Web publique préremplie ; aucune clé privée.
 - `firebase.json` / `vercel.json` : configuration d'hébergement et d'émulateur.
 
 ## Licence
@@ -157,7 +157,7 @@ Le projet Firebase utilisé est `music-house-bta`, avec le domaine Auth `music-h
 
 ### Activation obligatoire dans Firebase Console
 
-La configuration Web ne crée pas à elle seule la base ni n'active les méthodes d'authentification. Dans le projet `music-house-bta), le propriétaire doit vérifier :
+La configuration Web ne crée pas à elle seule la base ni n'active les méthodes d'authentification. Dans le projet `music-house-bta`, le propriétaire doit vérifier :
 1. **Authentication → Sign-in method → Email/Password** : activer le fournisseur e-mail/mot de passe.
 2. **Firestore Database** : créer la base de données native si elle n'existe pas encore et choisir sa région.
 3. **Authentication → Settings → Authorized domains** : vérifier que le domaine de l'application sera autorisé.
