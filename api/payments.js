@@ -122,6 +122,54 @@ function appointmentLockIds(appointment) {
   return { ids, resourceId, start, end };
 }
 
+
+async function expirePendingAppointment(services, appointmentId) {
+  const db = services.db;
+  const appointmentRef = db.collection('appointments').doc(appointmentId);
+  const snapshot = await appointmentRef.get();
+  if (!snapshot.exists) return false;
+  const appointment = snapshot.data() || {};
+  if (appointment.status !== 'awaiting_deposit' || (Number(appointment.amountPaidXaf) || 0) > 0) return false;
+  const deadline = appointment.depositDeadlineAt && typeof appointment.depositDeadlineAt.toDate === 'function'
+    ? appointment.depositDeadlineAt.toDate().getTime()
+    : appointment.depositDeadlineAt ? new Date(appointment.depositDeadlineAt).getTime() : 0;
+  if (!Number.isFinite(deadline) || deadline <= 0 || deadline >= Date.now()) return false;
+
+  const lockData = appointmentLockIds(appointment);
+  const lockRefs = lockData.ids.map((id) => db.collection('appointmentLocks').doc(id));
+  const noticeRef = db.collection('notifications').doc();
+  await db.runTransaction(async (transaction) => {
+    const fresh = await transaction.get(appointmentRef);
+    if (!fresh.exists || fresh.data().status !== 'awaiting_deposit') return;
+    if ((Number(fresh.data().amountPaidXaf) || 0) > 0) return;
+    const currentDeadline = fresh.data().depositDeadlineAt && typeof fresh.data().depositDeadlineAt.toDate === 'function'
+      ? fresh.data().depositDeadlineAt.toDate().getTime()
+      : fresh.data().depositDeadlineAt ? new Date(fresh.data().depositDeadlineAt).getTime() : 0;
+    if (!currentDeadline || currentDeadline >= Date.now()) return;
+    const locks = await Promise.all(lockRefs.map((ref) => transaction.get(ref)));
+    transaction.update(appointmentRef, {
+      status: 'expired',
+      expiredAt: services.FieldValue.serverTimestamp(),
+      updatedAt: services.FieldValue.serverTimestamp(),
+    });
+    locks.forEach((lock, index) => {
+      if (lock.exists && lock.data().appointmentId === appointmentId && lock.data().status === 'pending_payment') {
+        transaction.delete(lockRefs[index]);
+      }
+    });
+    if (fresh.data().ownerUid) transaction.set(noticeRef, {
+      recipientUid: fresh.data().ownerUid,
+      title: 'Le délai de confirmation est dépassé',
+      message: 'Le délai de paiement de votre acompte pour « ' + clean(fresh.data().serviceName || 'votre prestation', 100) + ' » est expiré. Contactez le studio pour proposer un nouveau créneau.',
+      kind: 'appointment_expired',
+      createdBy: 'system',
+      createdAt: services.FieldValue.serverTimestamp(),
+      readAt: null,
+    });
+  });
+  return true;
+}
+
 function escapeMailHtml(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -250,7 +298,8 @@ async function initiatePayment(context, body) {
     const deadline = typeof appointment.depositDeadlineAt.toDate === 'function'
       ? appointment.depositDeadlineAt.toDate().getTime() : new Date(appointment.depositDeadlineAt).getTime();
     if (Number.isFinite(deadline) && deadline > 0 && deadline < Date.now()) {
-      throw httpError('Le délai de paiement de cet acompte est dépassé. Contactez le studio pour proposer un nouveau créneau.');
+      await expirePendingAppointment(context.services, appointmentId);
+      throw httpError('Le délai de paiement de cet acompte est dépassé. Le créneau a été libéré. Contactez le studio pour proposer une nouvelle date.');
     }
   }
   const price = amount(appointment.servicePriceXaf, 'Prix de la prestation');
