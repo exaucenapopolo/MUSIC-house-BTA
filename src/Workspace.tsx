@@ -879,7 +879,7 @@ function ReportsPage({ data }: { data: ReturnType<typeof useWorkspaceData> }) {
 function SettingsPage({ rates, canManageRates, bookingPolicy, onSaveBookingPolicy, onInitialize, onSave, onTestEmail, onClearCache }: {
   rates: RateSet | null; canManageRates: boolean; bookingPolicy: BookingPolicy;
   onSaveBookingPolicy: (event: FormEvent<HTMLFormElement>) => void;
-  onInitialize: () => void; onSave: (event: FormEvent<HTMLHTMLFormElement>) => void; onTestEmail: () => void; onClearCache: () => void;
+  onInitialize: () => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onTestEmail: () => void; onClearCache: () => void;
 }) {
   return <><PageHeader eyebrow="CONFIGURATION DU STUDIO" title="Paramètres" subtitle="Conditions de réservation, offres commerciales et règles financières du studio." />
     <form key={`${bookingPolicy.defaultDepositPercent}-${bookingPolicy.defaultDiscountPercent}-${bookingPolicy.allowFullPaymentDefault}-${bookingPolicy.whatsappNumber}`} className="settings-card" onSubmit={onSaveBookingPolicy}>
