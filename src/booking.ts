@@ -5,6 +5,35 @@ import {
 import type { Appointment } from './domain';
 
 const SLOT_MS = 15 * 60 * 1000;
+const DOUALA_OFFSET_MS = 60 * 60 * 1000;
+
+/** datetime-local values have no timezone; interpret them explicitly in Africa/Douala. */
+export function parseDoualaDateTime(value: string): Date {
+  const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) throw new Error('Date invalide. Choisissez une date et une heure dans le calendrier.');
+  const [, y, mo, d, h, mi, se = '00'] = match;
+  const year = Number(y); const month = Number(mo); const day = Number(d);
+  const hour = Number(h); const minute = Number(mi); const second = Number(se);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23
+      || minute < 0 || minute > 59 || second !== 0) {
+    throw new Error('Date ou heure invalide. Vérifiez le jour et l’heure choisis.');
+  }
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second) - DOUALA_OFFSET_MS;
+  const localCheck = new Date(utc + DOUALA_OFFSET_MS);
+  if (localCheck.getUTCFullYear() !== year || localCheck.getUTCMonth() !== month - 1
+      || localCheck.getUTCDate() !== day || localCheck.getUTCHours() !== hour
+      || localCheck.getUTCMinutes() !== minute) {
+    throw new Error('Cette date n’existe pas dans le calendrier. Vérifiez le jour et le mois.');
+  }
+  return new Date(utc);
+}
+
+export function toDoualaDateTimeInput(value: Date): string {
+  const local = new Date(value.getTime() + DOUALA_OFFSET_MS);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return String(local.getUTCFullYear()) + '-' + pad(local.getUTCMonth() + 1) + '-'
+    + pad(local.getUTCDate()) + 'T' + pad(local.getUTCHours()) + ':' + pad(local.getUTCMinutes());
+}
 
 export function appointmentSlotIds(resourceId: string, start: Date, end: Date): string[] {
   const startMs = start.getTime();
@@ -83,7 +112,7 @@ export async function cancelAppointment(db: Firestore, appointmentId: string): P
     const snapshot = await transaction.get(ref);
     if (!snapshot.exists()) throw new Error('Rendez-vous introuvable.');
     const appointment = snapshot.data() as Appointment;
-    const ids = ['confirmed', 'in_progress'].includes(appointment.status)
+    const ids = ['awaiting_deposit', 'confirmed', 'in_progress'].includes(appointment.status)
       ? appointmentSlotIds(appointment.resourceId || 'studio', appointment.startsAt.toDate(), appointment.endsAt.toDate())
       : [];
     const lockRefs: DocumentReference[] = ids.map((id) => doc(db, 'appointmentLocks', id));
@@ -117,8 +146,9 @@ export async function updateAppointmentProgress(db: Firestore, appointmentId: st
 }
 
 export function buildAppointmentWindow(dateTime: string, durationMinutes: number): { startsAt: Timestamp; endsAt: Timestamp } {
-  const start = new Date(`${dateTime}:00+01:00`);
-  if (Number.isNaN(start.getTime())) throw new Error('Date de rendez-vous invalide.');
+  const start = parseDoualaDateTime(dateTime);
+  if (start.getTime() <= Date.now()) throw new Error('Choisissez une date future : le créneau demandé est déjà passé.');
+  if (start.getTime() % SLOT_MS !== 0) throw new Error('Choisissez une heure alignée sur un créneau de 15 minutes (00, 15, 30 ou 45).');
   const duration = Math.max(15, Math.ceil(durationMinutes / 15) * 15);
   const end = new Date(start.getTime() + duration * 60_000);
   return { startsAt: Timestamp.fromDate(start), endsAt: Timestamp.fromDate(end) };
@@ -134,7 +164,7 @@ export async function rescheduleAppointment(db: Firestore, appointmentId: string
     const appointment = snapshot.data() as Appointment;
     const duration = Math.max(15, Math.round((appointment.endsAt.toMillis() - appointment.startsAt.toMillis()) / 60_000));
     const next = buildAppointmentWindow(newDateTime, duration);
-    const oldIds = appointment.status === 'confirmed'
+    const oldIds = ['awaiting_deposit', 'confirmed', 'in_progress'].includes(appointment.status)
       ? appointmentSlotIds(appointment.resourceId || 'studio', appointment.startsAt.toDate(), appointment.endsAt.toDate())
       : [];
     const oldRefs = oldIds.map((id) => doc(db, 'appointmentLocks', id));

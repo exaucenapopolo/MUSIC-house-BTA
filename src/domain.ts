@@ -5,7 +5,8 @@ export type SplitType = 'studio' | 'distribution';
 export type PaymentMethod = 'cash' | 'mtn_momo' | 'orange_money' | 'transfer' | 'fapshi' | 'other';
 export type AppointmentStatus =
   | 'requested' | 'awaiting_deposit' | 'confirmed' | 'in_progress'
-  | 'completed' | 'cancelled' | 'no_show' | 'rescheduled';
+  | 'completed' | 'cancelled' | 'no_show' | 'rescheduled'
+  | 'rejected' | 'expired' | 'payment_review';
 export type ProjectStatus = 'planning' | 'in_progress' | 'waiting_client' | 'review' | 'completed' | 'on_hold';
 
 export interface UserProfile {
@@ -47,9 +48,41 @@ export interface Service {
   depositPercent: number;
   discountPercent?: number;
   allowFullPayment?: boolean;
+  imageUrl?: string;
+  youtubeUrl?: string;
+  highlights?: string[];
   splitType: SplitType;
   isActive: boolean;
   createdAt?: Timestamp;
+}
+
+export interface StudioTeamMember {
+  id: string;
+  name: string;
+  title: string;
+  bio?: string;
+  photoUrl?: string;
+}
+
+export interface StudioGalleryItem {
+  id: string;
+  url: string;
+  caption?: string;
+}
+
+export interface StudioProfile {
+  id: string;
+  name: string;
+  slogan?: string;
+  description?: string;
+  location?: string;
+  logoUrl?: string;
+  coverUrl?: string;
+  whatsappNumber?: string;
+  achievements?: string[];
+  team?: StudioTeamMember[];
+  gallery?: StudioGalleryItem[];
+  updatedAt?: Timestamp;
 }
 
 export interface Appointment {
@@ -64,7 +97,13 @@ export interface Appointment {
   discountPercent?: number;
   allowFullPayment?: boolean;
   depositExpectedXaf: number;
+  depositPercent?: number;
+  requestedDepositPercent?: number;
   amountPaidXaf: number;
+  acceptedAt?: Timestamp;
+  acceptedBy?: string;
+  depositDeadlineAt?: Timestamp;
+  rejectionReason?: string;
   producerUid?: string;
   producerName?: string;
   resourceId: string;
