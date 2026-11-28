@@ -425,6 +425,11 @@ async function settleSuccessfulPayment(context, attemptId, attemptData, provider
     throw httpError('La référence ou le compte associé à la transaction ne correspond pas. Aucune écriture financière n’a été créée.', 409);
   }
 
+  const managerEmail = String(process.env.MUSIC_HOUSE_MANAGER_EMAIL || 'exaucenapopolo2@gmail.com').trim().toLowerCase();
+  let managerUid = '';
+  try { managerUid = (await services.auth.getUserByEmail(managerEmail)).uid; } catch { /* retain payment review in the attempt record */ }
+  const managerReviewNotification = managerUid ? db.collection('notifications').doc() : null;
+
   const result = await db.runTransaction(async (transaction) => {
     const [freshAttempt, appointmentSnap, settingsSnap, existingPayment] = await Promise.all([
       transaction.get(attemptRef),
@@ -443,6 +448,35 @@ async function settleSuccessfulPayment(context, attemptId, attemptData, provider
     const appointment = appointmentSnap.data();
     if (appointment.ownerUid !== attemptData.ownerUid || appointment.ownerUid !== freshAttempt.data().ownerUid) {
       throw httpError('Le propriétaire du rendez-vous ne correspond pas au paiement.', 409);
+    }
+    if (!['awaiting_deposit', 'confirmed', 'in_progress'].includes(String(appointment.status))) {
+      const reviewReason = 'Fapshi confirme un paiement alors que la demande est ' + String(appointment.status || 'dans un état non payable') + '. Vérification et régularisation manuelles nécessaires.';
+      transaction.update(attemptRef, {
+        status: 'REVIEW_REQUIRED',
+        providerVerified: true,
+        providerStatus: 'SUCCESSFUL',
+        reviewReason,
+        providerRevenueXaf: netAmount,
+        providerFeeXaf: grossAmount - netAmount,
+        verifiedAt: services.FieldValue.serverTimestamp(),
+        updatedAt: services.FieldValue.serverTimestamp(),
+      });
+      transaction.update(appointmentRef, {
+        status: 'payment_review',
+        paymentReviewReason: reviewReason,
+        paymentReviewAt: services.FieldValue.serverTimestamp(),
+        updatedAt: services.FieldValue.serverTimestamp(),
+      });
+      if (managerReviewNotification) transaction.set(managerReviewNotification, {
+        recipientUid: managerUid,
+        title: 'Paiement à vérifier manuellement',
+        message: 'Fapshi signale un paiement réussi pour « ' + clean(appointment.serviceName || 'une prestation', 100) + ' », mais la demande n’est plus payable. Vérifiez la transaction et contactez l’artiste.',
+        kind: 'payment_review',
+        createdBy: 'fapshi',
+        createdAt: services.FieldValue.serverTimestamp(),
+        readAt: null,
+      });
+      return { reviewRequired: true, paymentId: null };
     }
     const currentPaid = Math.max(0, Number(appointment.amountPaidXaf) || 0);
     const serviceTotal = Number(appointment.servicePriceXaf) || 0;
