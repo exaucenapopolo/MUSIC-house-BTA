@@ -835,15 +835,18 @@ function ServicesPage({ role, rows, whatsappNumber, onBook, onAdd, onEdit, onTog
   </>;
 }
 
-function AppointmentsPage({ role, rows, producers = [], onAdd, onPayDeposit, onConfirm, onCancel, onReschedule, onProgress }: {
-  role: string; rows: Appointment[]; producers?: Array<{ uid: string; displayName: string }>;
+function AppointmentsPage({ role, rows, producers = [], whatsappNumber, onAdd, onPayDeposit, onAccept, onReject, onAssignProducer, onCancel, onReschedule, onProgress }: {
+  role: string; rows: Appointment[]; producers?: Array<{ uid: string; displayName: string }>; whatsappNumber: string;
   onAdd: () => void; onPayDeposit: (row: Appointment, paymentType: 'deposit' | 'full') => void;
-  onConfirm: (row: Appointment, producerUid?: string) => void; onCancel: (row: Appointment) => void;
-  onReschedule: (row: Appointment) => void; onProgress: (row: Appointment, status: string) => void;
+  onAccept: (row: Appointment, depositPercent: number, producerUid?: string) => void;
+  onReject: (row: Appointment) => void; onAssignProducer: (row: Appointment, producerUid: string) => void;
+  onCancel: (row: Appointment) => void; onReschedule: (row: Appointment) => void;
+  onProgress: (row: Appointment, status: string) => void;
 }) {
   const [view, setView] = useState<'day' | 'week' | 'month' | 'list'>('list');
   const [anchor, setAnchor] = useState(() => new Date());
   const [producerAssignments, setProducerAssignments] = useState<Record<string, string>>({});
+  const [depositInputs, setDepositInputs] = useState<Record<string, string>>({});
   const start = new Date(anchor); start.setHours(0, 0, 0, 0);
   if (view === 'week') { const weekday = (start.getDay() + 6) % 7; start.setDate(start.getDate() - weekday); }
   if (view === 'month') start.setDate(1);
@@ -852,7 +855,9 @@ function AppointmentsPage({ role, rows, producers = [], onAdd, onPayDeposit, onC
   if (view === 'week') end.setDate(end.getDate() + 7);
   if (view === 'month') end.setMonth(end.getMonth() + 1);
   const visibleRows = view === 'list' ? rows : rows.filter((row) => row.startsAt && row.startsAt.toDate() >= start && row.startsAt.toDate() < end);
-  return <><PageHeader eyebrow="CALENDRIER DU STUDIO" title={role === 'client' ? 'Mes rendez-vous' : role === 'producer' ? 'Mon calendrier de séances' : 'Rendez-vous'} subtitle="Demandes, acomptes et séances planifiées. Le créneau n’est réservé qu’après confirmation du studio." action={role !== 'producer' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Demander un rendez-vous' : 'Ajouter une demande'}</Button> : undefined} />
+  const phone = String(whatsappNumber || '').replace(/\D/g, '');
+
+  return <><PageHeader eyebrow="CALENDRIER DU STUDIO" title={role === 'client' ? 'Mes rendez-vous' : role === 'producer' ? 'Mon calendrier de séances' : 'Rendez-vous'} subtitle={role === 'client' ? 'Votre demande est examinée par le manager. Après acceptation, vous recevrez le montant de l’acompte à régler pour confirmer votre présence.' : 'Étudiez les demandes, fixez l’acompte et confirmez le créneau après paiement.'} action={role !== 'producer' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Demander un rendez-vous' : 'Ajouter une demande'}</Button> : undefined} />
     <div className="calendar-toolbar"><div className="view-switch">{(['day', 'week', 'month', 'list'] as const).map((item) => <button key={item} className={view === item ? 'active' : ''} onClick={() => setView(item)}>{({ day: 'Jour', week: 'Semaine', month: 'Mois', list: 'Liste' } as const)[item]}</button>)}</div><div className="calendar-date-nav"><button onClick={() => setAnchor(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - (view === 'week' ? 7 : view === 'month' ? 30 : 1)))}>←</button><b>{view === 'month' ? anchor.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: 'Africa/Douala' }) : formatDate(anchor)}</b><button onClick={() => setAnchor(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + (view === 'week' ? 7 : view === 'month' ? 30 : 1)))}>→</button><button className="today-button" onClick={() => setAnchor(new Date())}>Aujourd’hui</button></div></div>
     <div className="table-panel"><div className="table-head"><b>{visibleRows.length} rendez-vous {view === 'list' ? 'chargés' : 'dans cette période'}</b><span>Heure locale : Africa/Douala · Créneaux de 15 minutes</span></div><div className="table-scroll"><table><thead><tr><th>DATE & HEURE</th><th>ARTISTE</th><th>PRESTATION</th><th>ACOMPTE</th><th>INTERVENANT</th><th>STATUT</th><th>ACTIONS</th></tr></thead><tbody>{visibleRows.map((row) => {
       const paid = Number(row.amountPaidXaf) || 0;
@@ -860,22 +865,29 @@ function AppointmentsPage({ role, rows, producers = [], onAdd, onPayDeposit, onC
       const total = Number(row.servicePriceXaf) || 0;
       const remaining = Math.max(0, total - paid);
       const depositDue = Math.max(0, deposit - paid);
-      const payable = role === 'client' && !['cancelled', 'completed', 'no_show'].includes(row.status);
+      const payable = role === 'client' && ['awaiting_deposit', 'confirmed', 'in_progress'].includes(row.status);
+      const assigned = producerAssignments[row.id] ?? row.producerUid ?? '';
+      const requestedDeposit = Number(row.requestedDepositPercent) || 50;
+      const percent = Number(depositInputs[row.id] ?? String(requestedDeposit));
+      const whatsappText = 'Bonjour MUSIC HOUSE BTA, concernant ma demande de rendez-vous pour « ' + row.serviceName + ' » prévue le ' + formatDate(row.startsAt) + ', j’aimerais obtenir des précisions.';
       return <tr key={row.id}>
         <td><b>{formatDate(row.startsAt)}</b><small className="table-sub">{row.startsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })} – {row.endsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })}</small></td>
         <td>{row.artistName}</td>
-        <td>{row.serviceName}<small className="table-sub">Prix : {formatXaf(total)}{row.discountPercent ? ` · remise ${row.discountPercent}%` : ''}</small></td>
-        <td>{formatXaf(deposit)}<small className="table-sub">Payé : {formatXaf(paid)} · Reste : {formatXaf(remaining)}</small></td>
-        <td>{role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) ? <select className="mini-select" value={producerAssignments[row.id] ?? row.producerUid ?? ''} onChange={(event) => setProducerAssignments((current) => ({ ...current, [row.id]: event.target.value }))}><option value="">À affecter</option>{producers.map((producer) => <option key={producer.uid} value={producer.uid}>{producer.displayName}</option>)}</select> : row.producerName || 'À affecter'}</td>
-        <td><StatusPill value={row.status} /></td>
+        <td>{row.serviceName}<small className="table-sub">Prix : {formatXaf(total)}{row.discountPercent ? ' · remise ' + row.discountPercent + '%' : ''}</small></td>
+        <td>{formatXaf(deposit)}<small className="table-sub">Payé : {formatXaf(paid)} · Reste : {formatXaf(remaining)}</small>{row.status === 'requested' && role === 'manager' ? <small className="table-sub">À définir à l’acceptation</small> : null}</td>
+        <td>{role === 'manager' && ['requested', 'rescheduled', 'awaiting_deposit'].includes(row.status) ? <select className="mini-select" value={assigned} onChange={(event) => setProducerAssignments((current) => ({ ...current, [row.id]: event.target.value }))}><option value="">À affecter</option>{producers.map((producer) => <option key={producer.uid} value={producer.uid}>{producer.displayName}</option>)}</select> : row.producerName || 'À affecter'}</td>
+        <td><StatusPill value={row.status} />{row.status === 'awaiting_deposit' && role === 'client' && <small className="table-sub">Votre présence sera confirmée dès réception de l’acompte.</small>}{row.depositDeadlineAt && row.status === 'awaiting_deposit' && <small className="table-sub">Limite : {formatDate(row.depositDeadlineAt, { hour: '2-digit', minute: '2-digit' })}</small>}{row.rejectionReason && <small className="table-sub">{row.rejectionReason}</small>}</td>
         <td><div className="row-actions">
+          {role === 'manager' && row.status === 'requested' && <div className="appointment-accept-box"><label><span>Acompte à demander (%)</span><input className="field" type="number" min="1" max="100" step="1" value={depositInputs[row.id] ?? String(requestedDeposit)} onChange={(event) => setDepositInputs((current) => ({ ...current, [row.id]: event.target.value }))}/></label><button className="mini-action primary-mini" onClick={() => onAccept(row, percent, assigned || undefined)} disabled={!navigator.onLine || !Number.isInteger(percent) || percent < 1 || percent > 100}>Accepter & demander le paiement</button><button className="mini-action" onClick={() => onReject(row)} disabled={!navigator.onLine}>Refuser</button></div>}
+          {role === 'manager' && row.status === 'awaiting_deposit' && !row.producerUid && assigned && <button className="mini-action" onClick={() => onAssignProducer(row, assigned)}>Affecter le producteur</button>}
           {payable && depositDue > 0 && <button className="mini-action primary-mini" onClick={() => onPayDeposit(row, 'deposit')} disabled={!navigator.onLine}>Payer l’acompte · {formatXaf(depositDue)}</button>}
           {payable && row.allowFullPayment !== false && remaining > 0 && (depositDue === 0 || remaining > depositDue) && <button className="mini-action" onClick={() => onPayDeposit(row, 'full')} disabled={!navigator.onLine}>{paid > 0 ? 'Régler le solde' : 'Tout régler'} · {formatXaf(remaining)}</button>}
-          {role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) && <button className="mini-action primary-mini" onClick={() => onConfirm(row, producerAssignments[row.id] || row.producerUid || undefined)} disabled={!navigator.onLine || !(producerAssignments[row.id] || row.producerUid)}>Confirmer</button>}
           {role === 'manager' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onReschedule(row)} disabled={!navigator.onLine}>Déplacer</button>}
           {role === 'producer' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onProgress(row, 'in_progress')}>Démarrer</button>}
           {(role === 'producer' || role === 'manager') && row.status === 'in_progress' && <button className="mini-action" onClick={() => onProgress(row, 'completed')}>Terminer</button>}
-          {(role === 'manager' || (role === 'client' && ['requested', 'awaiting_deposit'].includes(row.status))) && !['cancelled', 'completed'].includes(row.status) && <button className="icon-button danger-icon" title="Annuler" onClick={() => onCancel(row)}><X size={15} /></button>}
+          {role === 'client' && row.status === 'requested' && <span className="appointment-waiting-note">En attente d’acceptation du studio</span>}
+          {role === 'client' && phone && ['awaiting_deposit', 'confirmed'].includes(row.status) && <a className="mini-action" href={'https://wa.me/' + phone + '?text=' + encodeURIComponent(whatsappText)} target="_blank" rel="noreferrer">Contacter le studio</a>}
+          {(role === 'manager' || (role === 'client' && ['requested', 'awaiting_deposit'].includes(row.status))) && !['cancelled', 'completed', 'rejected'].includes(row.status) && <button className="icon-button danger-icon" title="Annuler" onClick={() => onCancel(row)}><X size={15}/></button>}
         </div></td>
       </tr>;
     })}</tbody></table></div>{!rows.length && <EmptyState title="Aucun rendez-vous enregistré" text="Les demandes du site et les séances planifiées seront affichées ici." />}</div>
