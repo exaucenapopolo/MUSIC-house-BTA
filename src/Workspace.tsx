@@ -8,12 +8,13 @@ import {
   Users, Wallet, WifiOff, X,
 } from 'lucide-react';
 import {
-  addDoc, arrayUnion, collection, doc, orderBy, runTransaction, serverTimestamp, updateDoc, where, Timestamp, writeBatch,
+  addDoc, arrayUnion, collection, doc, getDoc, orderBy, runTransaction, serverTimestamp, setDoc, updateDoc, where, Timestamp, writeBatch,
 } from 'firebase/firestore';
 import type { QueryConstraint } from 'firebase/firestore';
 import { useAuth } from './auth';
 import { uploadArtistAvatar } from './cloudinary';
 import { callStudioApi, notifyStudioEmail } from './studioApi';
+import { callPaymentApi } from './paymentApi';
 import { db, clearLocalFirestoreCache } from './firebase';
 import { useLiveCollection } from './hooks';
 import {
@@ -55,9 +56,11 @@ const producerNav: NavItem[] = [
   { key: 'artists', label: 'Artistes concernés', icon: Users },
   { key: 'projects', label: 'Projets & productions', icon: FolderKanban },
   { key: 'appointments', label: 'Séances', icon: Headphones },
+  { key: 'services', label: 'Prestations & tarifs', icon: SlidersHorizontal },
   { key: 'expenses', label: 'Dépenses à déclarer', icon: ArrowDownRight, group: 'SUIVI' },
   { key: 'commissions', label: 'Mon relevé', icon: Wallet },
   { key: 'notifications', label: 'Notifications', icon: Bell },
+  { key: 'settings', label: 'Paramètres du studio', icon: Settings, group: 'STUDIO' },
   { key: 'profile', label: 'Mon profil', icon: UserRound },
 ];
 const clientNav: NavItem[] = [
@@ -75,7 +78,7 @@ function constraintsFor(role: string, uid: string, key: string): QueryConstraint
   const createdDesc = orderBy('createdAt', 'desc');
   if (key === 'artists') return role === 'manager' ? [createdDesc] : role === 'producer' ? [where('producerUids', 'array-contains', uid), createdDesc] : [where('ownerUid', '==', uid), createdDesc];
   if (key === 'appointments') return role === 'manager' ? [orderBy('startsAt', 'asc')] : role === 'producer' ? [where('producerUid', '==', uid), orderBy('startsAt', 'asc')] : [where('ownerUid', '==', uid), orderBy('startsAt', 'asc')];
-  if (key === 'services') return role === 'manager' ? [createdDesc] : [where('isActive', '==', true), orderBy('name', 'asc')];
+  if (key === 'services') return role === 'manager' || role === 'producer' ? [createdDesc] : [where('isActive', '==', true), orderBy('name', 'asc')];
   if (key === 'projects') return role === 'manager' ? [createdDesc] : role === 'producer' ? [where('producerUid', '==', uid), createdDesc] : [where('ownerUid', '==', uid), where('clientVisible', '==', true), createdDesc];
   if (key === 'payments') return role === 'manager' ? [createdDesc] : role === 'producer' ? [where('producerUid', '==', uid), createdDesc] : [where('ownerUid', '==', uid), createdDesc];
   if (key === 'paymentSubmissions') return role === 'manager' ? [where('status', '==', 'pending'), createdDesc] : role === 'client' ? [where('ownerUid', '==', uid), createdDesc] : [];
@@ -95,6 +98,7 @@ function useWorkspaceData(role: string, uid: string) {
   const projects = useLiveCollection<MusicProject>('projects', useMemo(() => constraints('projects'), [role, uid]), 300);
   const payments = useLiveCollection<Payment | PaymentReceipt>(role === 'client' ? 'paymentReceipts' : 'payments', useMemo(() => constraints('payments'), [role, uid]), 300);
   const submissions = useLiveCollection<any>(role === 'manager' || role === 'client' ? 'paymentSubmissions' : null, useMemo(() => constraints('paymentSubmissions'), [role, uid]));
+  const paymentAttempts = useLiveCollection<any>(role === 'manager' ? 'paymentAttempts' : null, useMemo(() => role === 'manager' ? [orderBy('createdAt', 'desc')] : [], [role]), 150);
   const expensesOwn = useLiveCollection<Expense>(role === 'client' ? null : 'expenses', useMemo(() => role === 'producer' ? [where('submittedBy', '==', uid), orderBy('createdAt', 'desc')] : role === 'manager' ? [orderBy('createdAt', 'desc')] : [], [role, uid]));
   const expensesJoint = useLiveCollection<Expense>(role === 'producer' ? 'expenses' : null, useMemo(() => [where('jointApprovalRequired', '==', true), orderBy('createdAt', 'desc')], []));
   const expenses = role === 'producer' ? {
@@ -108,7 +112,7 @@ function useWorkspaceData(role: string, uid: string) {
   const distribution = useLiveCollection<any>(role === 'producer' ? null : 'distributionOrders', useMemo(() => constraints('distribution'), [role, uid]));
   const notifications = useLiveCollection<NotificationItem>('notifications', useMemo(() => constraints('notifications'), [role, uid]));
   const users = useLiveCollection<any>(role === 'manager' ? 'users' : null, useMemo(() => constraints('users'), [role, uid]));
-  return { artists, services, appointments, projects, payments, submissions, expenses, commissions, distribution, notifications, users };
+  return { artists, services, appointments, projects, payments, submissions, paymentAttempts, expenses, commissions, distribution, notifications, users };
 }
 
 function Modal({ title, description, children, onClose }: { title: string; description?: string; children: ReactNode; onClose: () => void }) {
@@ -179,6 +183,9 @@ function csvExport(filename: string, rows: Array<Record<string, string | number 
   const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
 }
 
+const DEFAULT_BOOKING_POLICY = { defaultDepositPercent: 50, defaultDiscountPercent: 0, allowFullPaymentDefault: true, whatsappNumber: '' };
+type BookingPolicy = typeof DEFAULT_BOOKING_POLICY;
+
 export default function Workspace() {
   const { user, profile, logout } = useAuth();
   const role = profile?.role || 'client'; const uid = user?.uid || '';
@@ -192,6 +199,9 @@ export default function Workspace() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [rates, setRates] = useState<RateSet | null>(null);
+  const [bookingPolicy, setBookingPolicy] = useState<BookingPolicy>(DEFAULT_BOOKING_POLICY);
+  const [selectedServiceId, setSelectedServiceId] = useState('');
+  const [editingService, setEditingService] = useState<Service | null>(null);
   const [managerUsers, setManagerUsers] = useState<Array<{ uid: string; displayName: string; email: string; role: string; active: boolean; photoURL?: string }>>([]);
   const [messageArtist, setMessageArtist] = useState<Artist | null>(null);
   const [myProfile, setMyProfile] = useState<Artist | null>(null);
@@ -211,6 +221,9 @@ export default function Workspace() {
 
   useEffect(() => {
     if (role === 'manager' || role === 'producer') getRateSet(db!).then(setRates).catch((error) => setNotice({ type: 'error', message: error.message }));
+    getDoc(doc(db!, 'settings', 'bookingPolicy')).then((snapshot) => {
+      if (snapshot.exists()) setBookingPolicy({ ...DEFAULT_BOOKING_POLICY, ...snapshot.data() } as BookingPolicy);
+    }).catch((error) => setNotice({ type: 'error', message: error.message || 'Paramètres de réservation indisponibles.' }));
   }, [role]);
 
   useEffect(() => {
@@ -265,49 +278,94 @@ export default function Workspace() {
   async function createService(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     await action(async () => {
-      const priceXaf = Number(form.get('priceXaf')); const depositPercent = Number(form.get('depositPercent'));
-      if (!Number.isSafeInteger(priceXaf) || priceXaf < 0) throw new Error('Le tarif doit être un montant XAF entier.');
+      if (role !== 'manager' && role !== 'producer') throw new Error('Seuls les responsables du studio peuvent gérer les prestations.');
+      const priceXaf = Number(form.get('priceXaf'));
+      const depositPercent = Number(form.get('depositPercent'));
+      const discountPercent = Number(form.get('discountPercent') || 0);
+      if (!Number.isSafeInteger(priceXaf) || priceXaf <= 0) throw new Error('Le tarif doit être un montant XAF entier supérieur à zéro.');
       if (!Number.isInteger(depositPercent) || depositPercent < 0 || depositPercent > 100) throw new Error('Acompte invalide.');
-      await addDoc(collection(db!, 'services'), {
+      if (!Number.isInteger(discountPercent) || discountPercent < 0 || discountPercent > 90) throw new Error('La remise doit être comprise entre 0 et 90 %.');
+      const serviceData = {
         name: String(form.get('name') || '').trim(), category: String(form.get('category') || '').trim(),
         description: String(form.get('description') || '').trim(), priceXaf,
-        durationMinutes: Number(form.get('durationMinutes')) || 0, depositPercent,
+        durationMinutes: Number(form.get('durationMinutes')) || 0, depositPercent, discountPercent,
+        allowFullPayment: form.get('allowFullPayment') === 'on',
         splitType: form.get('splitType') === 'distribution' ? 'distribution' : 'studio',
-        isActive: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-      });
-    }, 'La prestation a été créée.');
+        updatedBy: uid, updatedAt: serverTimestamp(),
+      };
+      if (editingService) {
+        await updateDoc(doc(db!, 'services', editingService.id), serviceData);
+        setEditingService(null);
+      } else {
+        await addDoc(collection(db!, 'services'), { ...serviceData, isActive: true, createdBy: uid, createdAt: serverTimestamp() });
+      }
+    }, 'La prestation et ses conditions de paiement ont été enregistrées.');
   }
 
   async function createAppointment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     await action(async () => {
       const service = data.services.rows.find((row) => row.id === String(form.get('serviceId')));
-      if (!service) throw new Error('Sélectionnez une prestation active.');
+      if (!service || !service.isActive) throw new Error('Sélectionnez une prestation active.');
       const artist = role === 'client' ? myProfile : data.artists.rows.find((row) => row.id === String(form.get('artistId')));
       if (!artist && role === 'client') throw new Error('Complétez d’abord votre profil artistique.');
       if (!artist) throw new Error('Sélectionnez un artiste.');
       const windowTimes = buildAppointmentWindow(String(form.get('startsAt') || ''), service.durationMinutes || 60);
       const ownerUid = role === 'client' ? uid : (artist.ownerUid || 'manual');
-      const deposit = Math.ceil((service.priceXaf * service.depositPercent) / 100);
+      const originalPriceXaf = Number(service.priceXaf);
+      const discountPercent = Math.max(0, Math.min(90, Number(service.discountPercent) || 0));
+      const servicePriceXaf = Math.round(originalPriceXaf * (100 - discountPercent) / 100);
+      const depositPercent = Number.isInteger(service.depositPercent) ? service.depositPercent : bookingPolicy.defaultDepositPercent;
+      const deposit = Math.ceil((servicePriceXaf * depositPercent) / 100);
+      if (!Number.isSafeInteger(servicePriceXaf) || servicePriceXaf <= 0) throw new Error('Le prix final de cette prestation est invalide.');
       const assignedProducerUid = role === 'manager' ? String(form.get('producerUid') || '') || null : null;
       const appointmentRef = doc(collection(db!, 'appointments'));
       const batch = writeBatch(db!);
       batch.set(appointmentRef, {
         ownerUid, artistId: artist.id, artistName: artist.stageName || artist.fullName,
-        serviceId: service.id, serviceName: service.name, servicePriceXaf: service.priceXaf,
+        serviceId: service.id, serviceName: service.name,
+        servicePriceXaf, serviceOriginalPriceXaf: originalPriceXaf, discountPercent,
+        allowFullPayment: service.allowFullPayment !== false,
         splitType: service.splitType, depositExpectedXaf: deposit, amountPaidXaf: 0,
         ...(role === 'manager' ? {
           producerUid: assignedProducerUid,
           producerName: managerUsers.find((entry) => entry.uid === assignedProducerUid && entry.active)?.displayName || null,
         } : {}),
         resourceId: 'studio', ...windowTimes,
-        status: 'requested', clientNote: String(form.get('clientNote') || '').trim(),
-        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        status: deposit > 0 ? 'awaiting_deposit' : 'requested',
+        clientNote: String(form.get('clientNote') || '').trim(),
+        createdBy: uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
       if (assignedProducerUid) batch.update(doc(db!, 'artists', artist.id), { producerUids: arrayUnion(assignedProducerUid), updatedAt: serverTimestamp() });
       await batch.commit();
-      if (role === 'client') await notifyStudioEmail('appointmentRequested', { appointmentId: appointmentRef.id });
-    }, role === 'client' ? 'Votre demande de rendez-vous a été envoyée.' : 'La demande de rendez-vous a été créée.');
+      if (role === 'client' || role === 'manager') await notifyStudioEmail('appointmentRequested', { appointmentId: appointmentRef.id });
+    }, role === 'client' ? 'Votre demande a été envoyée. Vous pourrez régler l’acompte depuis vos rendez-vous.' : 'La demande de rendez-vous a été créée et transmise à l’artiste.');
+  }
+
+  async function payAppointment(row: Appointment, paymentType: 'deposit' | 'full') {
+    await action(async () => {
+      if (!navigator.onLine) throw new Error('Le paiement en ligne exige une connexion Internet.');
+      const result = await callPaymentApi('initiate', { appointmentId: row.id, paymentType });
+      const checkoutUrl = String(result.checkoutUrl || '');
+      if (!checkoutUrl) throw new Error('Fapshi n’a pas retourné de lien de paiement sécurisé.');
+      window.location.assign(checkoutUrl);
+    }, 'Redirection sécurisée vers Fapshi…');
+  }
+
+  async function saveBookingPolicy(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    await action(async () => {
+      if (role !== 'manager' && role !== 'producer') throw new Error('Droits insuffisants pour modifier les conditions commerciales.');
+      const defaultDepositPercent = Number(form.get('defaultDepositPercent'));
+      const defaultDiscountPercent = Number(form.get('defaultDiscountPercent'));
+      const whatsappNumber = String(form.get('whatsappNumber') || '').trim();
+      if (!Number.isInteger(defaultDepositPercent) || defaultDepositPercent < 0 || defaultDepositPercent > 100) throw new Error('L’acompte par défaut doit être compris entre 0 et 100 %.');
+      if (!Number.isInteger(defaultDiscountPercent) || defaultDiscountPercent < 0 || defaultDiscountPercent > 90) throw new Error('La remise par défaut doit être comprise entre 0 et 90 %.');
+      if (whatsappNumber && !/^\+?[0-9 ()-]{8,22}$/.test(whatsappNumber)) throw new Error('Le numéro WhatsApp doit être saisi au format international, par exemple +2376XXXXXXXX.');
+      const next = { defaultDepositPercent, defaultDiscountPercent, allowFullPaymentDefault: form.get('allowFullPaymentDefault') === 'on', whatsappNumber, updatedBy: uid, updatedAt: serverTimestamp() };
+      await setDoc(doc(db!, 'settings', 'bookingPolicy'), next, { merge: true });
+      setBookingPolicy({ ...DEFAULT_BOOKING_POLICY, ...next });
+    }, 'Les conditions commerciales et le contact WhatsApp ont été enregistrés.');
   }
 
   async function createProject(event: FormEvent<HTMLFormElement>) {
@@ -560,15 +618,15 @@ export default function Workspace() {
         {section === 'dashboard' && <Dashboard role={role} profileName={profile?.displayName || 'Artiste'} data={data} onNavigate={onNavigate} />}
         {section === 'artists' && (role === 'manager' || role === 'producer') && <ArtistsPage rows={filtered(data.artists.rows)} readOnly={role === 'producer'} onAdd={() => setModal('artist')} onMessage={(row) => { setMessageArtist(row); setModal('artist-message'); }} onArchive={(row) => action(async () => { await updateDoc(doc(db!, 'artists', row.id), { status: row.status === 'archived' ? 'active' : 'archived', updatedAt: serverTimestamp() }); }, 'Le statut du profil a été modifié.')} />}
         {section === 'team' && role === 'manager' && <TeamPage rows={managerUsers} onAdd={() => setModal('producer')} />}
-        {section === 'services' && <ServicesPage role={role} rows={filtered(data.services.rows)} onAdd={() => setModal('service')} onToggle={(row) => action(async () => { await updateDoc(doc(db!, 'services', row.id), { isActive: !row.isActive, updatedAt: serverTimestamp() }); }, 'Le catalogue a été mis à jour.')} />}
-        {(section === 'appointments' || section === 'calendar') && <AppointmentsPage role={role} rows={filtered(data.appointments.rows)} producers={managerUsers.filter((entry) => entry.role === 'producer' && entry.active)} onAdd={() => setModal('appointment')} onConfirm={(row, producerUid) => action(async () => { let waiver: string | undefined; if ((row.amountPaidXaf || 0) < (row.depositExpectedXaf || 0)) { waiver = window.prompt(`Acompte requis : ${formatXaf(row.depositExpectedXaf)} · déjà reçu : ${formatXaf(row.amountPaidXaf || 0)}. Motif obligatoire de la dérogation manager :`) || undefined; if (!waiver?.trim()) throw new Error('La confirmation a été annulée : l’acompte reste insuffisant.'); } const producer = managerUsers.find((entry) => entry.uid === producerUid && entry.role === 'producer' && entry.active); await confirmAppointment(db!, row.id, uid, waiver, producer ? { uid: producer.uid, name: producer.displayName } : undefined); await notifyStudioEmail('appointmentConfirmed', { appointmentId: row.id }); }, 'Le créneau est confirmé et réservé.')} onCancel={(row) => action(() => cancelAppointment(db!, row.id), 'Le rendez-vous a été annulé et le créneau libéré.')} onReschedule={(row) => { const next = window.prompt('Nouvelle date et heure (heure de Douala), format AAAA-MM-JJTHH:MM :'); if (next) action(() => rescheduleAppointment(db!, row.id, next), 'Le rendez-vous a été déplacé. Une nouvelle confirmation du créneau est nécessaire.'); }} onProgress={(row, status) => action(() => updateAppointmentProgress(db!, row.id, status as 'in_progress' | 'completed'), status === 'completed' ? 'Séance terminée et créneau libéré.' : 'Séance démarrée.')} />}
+        {section === 'services' && <ServicesPage role={role} rows={filtered(data.services.rows)} whatsappNumber={bookingPolicy.whatsappNumber} onBook={(row) => { setSelectedServiceId(row.id); setModal('appointment'); }} onAdd={() => { setEditingService(null); setModal('service'); }} onEdit={(row) => { setEditingService(row); setModal('service'); }} onToggle={(row) => action(async () => { if (role !== 'manager' && role !== 'producer') throw new Error('Droits insuffisants.'); await updateDoc(doc(db!, 'services', row.id), { isActive: !row.isActive, updatedAt: serverTimestamp() }); }, 'Le catalogue a été mis à jour.')} />}
+        {(section === 'appointments' || section === 'calendar') && <AppointmentsPage role={role} rows={filtered(data.appointments.rows)} producers={managerUsers.filter((entry) => entry.role === 'producer' && entry.active)} onAdd={() => { setSelectedServiceId(''); setModal('appointment'); }} onPayDeposit={payAppointment} onConfirm={(row, producerUid) => action(async () => { let waiver: string | undefined; if ((row.amountPaidXaf || 0) < (row.depositExpectedXaf || 0)) { waiver = window.prompt(`Acompte requis : ${formatXaf(row.depositExpectedXaf)} · déjà reçu : ${formatXaf(row.amountPaidXaf || 0)}. Motif obligatoire de la dérogation manager :`) || undefined; if (!waiver?.trim()) throw new Error('La confirmation a été annulée : l’acompte reste insuffisant.'); } const producer = managerUsers.find((entry) => entry.uid === producerUid && entry.role === 'producer' && entry.active); await confirmAppointment(db!, row.id, uid, waiver, producer ? { uid: producer.uid, name: producer.displayName } : undefined); await notifyStudioEmail('appointmentConfirmed', { appointmentId: row.id }); }, 'Le créneau est confirmé et réservé.')} onCancel={(row) => action(() => cancelAppointment(db!, row.id), 'Le rendez-vous a été annulé et le créneau libéré.')} onReschedule={(row) => { const next = window.prompt('Nouvelle date et heure (heure de Douala), format AAAA-MM-JJTHH:MM :'); if (next) action(() => rescheduleAppointment(db!, row.id, next), 'Le rendez-vous a été déplacé. Une nouvelle confirmation du créneau est nécessaire.'); }} onProgress={(row, status) => action(() => updateAppointmentProgress(db!, row.id, status as 'in_progress' | 'completed'), status === 'completed' ? 'Séance terminée et créneau libéré.' : 'Séance démarrée.')} />}
         {section === 'projects' && <ProjectsPage role={role} rows={filtered(data.projects.rows)} onAdd={() => setModal('project')} onStep={updateStep} onNote={addProjectNote} />}
-        {section === 'payments' && <PaymentsPage role={role} rows={filtered(data.payments.rows)} submissions={filtered(data.submissions.rows)} onAdd={() => setModal(role === 'client' ? 'payment-claim' : 'payment')} onProcess={handlePaymentSubmission} onReverse={reversePayment} />}
+        {section === 'payments' && <PaymentsPage role={role} rows={filtered(data.payments.rows)} submissions={filtered(data.submissions.rows)} attempts={data.paymentAttempts.rows} onVerifyAttempt={(row) => action(async () => { const result = await callPaymentApi('verify', { attemptId: row.id }); if (result.status === 'REVIEW_REQUIRED') throw new Error('Fapshi confirme le paiement, mais le montant doit être contrôlé manuellement par le manager.'); }, 'Le statut Fapshi a été vérifié.')} onAdd={() => setModal(role === 'client' ? 'payment-claim' : 'payment')} onProcess={handlePaymentSubmission} onReverse={reversePayment} />}
         {section === 'expenses' && role !== 'client' && <ExpensesPage role={role} rows={filtered(data.expenses.rows)} onAdd={() => setModal('expense')} onStatus={markExpense} />}
         {section === 'commissions' && <CommissionsPage role={role} rows={filtered(data.commissions.rows)} onPaid={markCommissionPaid} />}
         {section === 'distribution' && role !== 'producer' && <DistributionPage role={role} rows={filtered(data.distribution.rows)} onAdd={() => setModal('distribution')} onStatus={(row, status) => action(async () => { await updateDoc(doc(db!, 'distributionOrders', row.id), { status, updatedAt: serverTimestamp(), updatedBy: uid }); if (role === 'manager') await notifyStudioEmail('distributionStatus', { orderId: row.id, status }); }, 'Le statut de distribution a été mis à jour.')} />}
         {section === 'reports' && role === 'manager' && <ReportsPage data={data} />}
-        {section === 'settings' && role === 'manager' && <SettingsPage rates={rates} onInitialize={() => action(async () => { await initializeBusinessSettings(db!, uid); setRates(await getRateSet(db!)); }, 'Les paramètres financiers par défaut ont été initialisés.')} onSave={saveRates} onClearCache={() => action(() => clearLocalFirestoreCache(), 'Le cache local a été effacé.')} />}
+        {section === 'settings' && (role === 'manager' || role === 'producer') && <SettingsPage rates={role === 'manager' ? rates : null} canManageRates={role === 'manager'} bookingPolicy={bookingPolicy} onSaveBookingPolicy={saveBookingPolicy} onInitialize={() => action(async () => { await initializeBusinessSettings(db!, uid); setRates(await getRateSet(db!)); }, 'Les paramètres financiers par défaut ont été initialisés.')} onSave={saveRates} onClearCache={() => action(() => clearLocalFirestoreCache(), 'Le cache local a été effacé.')} />}
         {section === 'notifications' && <NotificationsPage rows={filtered(data.notifications.rows)} onRead={readNotification} />}
         {section === 'profile' && role === 'client' && <ProfilePage profile={myProfile} uid={uid} onSaved={() => setNotice({ type: 'success', message: 'Votre profil artistique a été mis à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
         {section === 'profile' && role !== 'client' && <AccountProfilePage uid={uid} displayName={profile?.displayName || ''} email={profile?.email || ''} photoURL={profile?.photoURL || ''} onSaved={() => setNotice({ type: 'success', message: 'Votre photo de profil a été mise à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
@@ -576,10 +634,10 @@ export default function Workspace() {
         <footer className="content-footer"><span>© 2026 MUSIC HOUSE BTA</span><span>Une plateforme pour <b>Young Forever Records</b></span><span>Fuseau horaire : Africa/Douala</span></footer>
       </section>
     </main>
-    {modal && <Modal title={modalTitle(modal)} description={modalDescription(modal)} onClose={() => setModal(null)}>
+    {modal && <Modal title={modal === 'service' && editingService ? 'Modifier une prestation' : modalTitle(modal)} description={modalDescription(modal)} onClose={() => { setModal(null); if (modal === 'appointment') setSelectedServiceId(''); if (modal === 'service') setEditingService(null); }}>
       {modal === 'artist' && <form className="form-grid" onSubmit={createArtist}><Field label="Nom et prénom" required><TextInput name="fullName" required placeholder="Nom complet" /></Field><Field label="Nom de scène"><TextInput name="stageName" placeholder="Nom artistique" /></Field><Field label="E-mail"><TextInput type="email" name="email" placeholder="artiste@exemple.com" /></Field><Field label="Téléphone"><TextInput name="phone" placeholder="+237…" /></Field><Field label="Ville"><TextInput name="city" placeholder="Yaoundé" /></Field><Field label="Genre musical"><TextInput name="genre" placeholder="Afrobeat, rap, gospel…" /></Field><div className="span-two"><Field label="Présentation"><TextArea name="bio" rows={3} placeholder="Quelques mots sur l’artiste…" /></Field></div><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? 'Enregistrement…' : 'Ajouter le profil'}</Button></div></form>}
-      {modal === 'service' && <form className="form-grid" onSubmit={createService}><Field label="Nom de la prestation" required><TextInput name="name" required placeholder="Enregistrement studio" /></Field><Field label="Catégorie" required><SelectInput name="category"><option>Enregistrement</option><option>Composition / instrumental</option><option>Arrangement</option><option>Mixage</option><option>Mastering</option><option>Production complète</option><option>Distribution numérique</option><option>Service complémentaire</option></SelectInput></Field><div className="span-two"><Field label="Description"><TextArea name="description" rows={2} placeholder="Détail du service et de ce qui est inclus…" /></Field></div><Field label="Tarif (FCFA)" required><TextInput name="priceXaf" type="number" min="0" step="1" required placeholder="25000" /></Field><Field label="Durée indicative (minutes)"><TextInput name="durationMinutes" type="number" min="0" step="15" defaultValue="60" /></Field><Field label="Acompte requis (%)"><TextInput name="depositPercent" type="number" min="0" max="100" step="1" defaultValue="50" /></Field><Field label="Répartition"><SelectInput name="splitType"><option value="studio">Prestation du studio (25 / 50 / 25)</option><option value="distribution">Distribution numérique (70 / 20 / 10)</option></SelectInput></Field><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Créer la prestation</Button></div></form>}
-      {modal === 'appointment' && <form className="form-grid" onSubmit={createAppointment}>{role === 'manager' && <Field label="Artiste / client" required><SelectInput name="artistId" required><option value="">Choisir un artiste</option>{data.artists.rows.filter((row) => row.status !== 'archived').map((row) => <option key={row.id} value={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field>}<Field label="Prestation" required><SelectInput name="serviceId" required><option value="">Choisir une prestation</option>{data.services.rows.filter((row) => row.isActive).map((row) => <option key={row.id} value={row.id}>{row.name} · {formatXaf(row.priceXaf)}</option>)}</SelectInput></Field><Field label="Date et heure (heure de Douala)" required><TextInput name="startsAt" type="datetime-local" required step="900" /></Field>{role === 'manager' && <Field label="Producteur affecté"><SelectInput name="producerUid"><option value="">À définir</option>{managerUsers.filter((entry) => entry.role === 'producer' && entry.active).map((entry) => <option key={entry.uid} value={entry.uid}>{entry.displayName}</option>)}</SelectInput></Field>}<div className="span-two"><Field label="Message / précision visible par le studio"><TextArea name="clientNote" rows={3} placeholder="Précisez votre besoin…" /></Field></div><p className="form-hint span-two">L’acompte prévu est calculé automatiquement selon les conditions de la prestation. Une demande ne réserve pas le créneau : la confirmation est faite par le manager après vérification de la disponibilité.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Envoyer la demande</Button></div></form>}
+      {modal === 'service' && <form className="form-grid" onSubmit={createService}><Field label="Nom de la prestation" required><TextInput name="name" required defaultValue={editingService?.name || ''} placeholder="Enregistrement studio" /></Field><Field label="Catégorie" required><SelectInput name="category" defaultValue={editingService?.category || 'Enregistrement'}><option>Enregistrement</option><option>Composition / instrumental</option><option>Arrangement</option><option>Mixage</option><option>Mastering</option><option>Production complète</option><option>Clip vidéo / YouTube</option><option>Distribution numérique</option><option>Service complémentaire</option></SelectInput></Field><div className="span-two"><Field label="Description"><TextArea name="description" rows={2} defaultValue={editingService?.description || ''} placeholder="Détail du service et de ce qui est inclus…" /></Field></div><Field label="Tarif normal (FCFA)" required><TextInput name="priceXaf" type="number" min="1" step="1" required defaultValue={editingService?.priceXaf ?? ''} placeholder="25000" /></Field><Field label="Durée indicative (minutes)"><TextInput name="durationMinutes" type="number" min="0" step="15" defaultValue={editingService?.durationMinutes ?? 60} /></Field><Field label="Acompte requis (%)"><TextInput name="depositPercent" type="number" min="0" max="100" step="1" defaultValue={editingService?.depositPercent ?? bookingPolicy.defaultDepositPercent} /></Field><Field label="Remise client (%)"><TextInput name="discountPercent" type="number" min="0" max="90" step="1" defaultValue={editingService?.discountPercent ?? bookingPolicy.defaultDiscountPercent} /></Field><Field label="Répartition"><SelectInput name="splitType" defaultValue={editingService?.splitType || 'studio'}><option value="studio">Prestation du studio (25 / 50 / 25)</option><option value="distribution">Distribution numérique (70 / 20 / 10)</option></SelectInput></Field><label className="check-row span-two"><input type="checkbox" name="allowFullPayment" defaultChecked={editingService?.allowFullPayment ?? bookingPolicy.allowFullPaymentDefault} /><span>Autoriser l’artiste à régler la totalité en ligne</span></label><div className="modal-actions span-two"><Button onClick={() => { setModal(null); setEditingService(null); }}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>{editingService ? 'Enregistrer les modifications' : 'Créer la prestation'}</Button></div></form>}
+      {modal === 'appointment' && <form className="form-grid" onSubmit={createAppointment}>{role === 'manager' && <Field label="Artiste / client" required><SelectInput name="artistId" required><option value="">Choisir un artiste</option>{data.artists.rows.filter((row) => row.status !== 'archived').map((row) => <option key={row.id} value={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field>}<Field label="Prestation" required><SelectInput name="serviceId" required defaultValue={selectedServiceId}><option value="">Choisir une prestation</option>{data.services.rows.filter((row) => row.isActive).map((row) => { const price = Math.round(Number(row.priceXaf) * (100 - (Number(row.discountPercent) || 0)) / 100); return <option key={row.id} value={row.id}>{row.name} · {formatXaf(price)}</option>; })}</SelectInput></Field><Field label="Date et heure (heure de Douala)" required><TextInput name="startsAt" type="datetime-local" required step="900" /></Field>{role === 'manager' && <Field label="Producteur affecté"><SelectInput name="producerUid"><option value="">À définir</option>{managerUsers.filter((entry) => entry.role === 'producer' && entry.active).map((entry) => <option key={entry.uid} value={entry.uid}>{entry.displayName}</option>)}</SelectInput></Field>}<div className="span-two"><Field label="Message / précision visible par le studio"><TextArea name="clientNote" rows={3} placeholder="Précisez votre besoin…" /></Field></div><p className="form-hint span-two">L’acompte prévu est calculé automatiquement selon les conditions de la prestation. Une demande ne réserve pas le créneau : la confirmation est faite par le manager après vérification de la disponibilité.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Envoyer la demande</Button></div></form>}
       {modal === 'project' && <form className="form-grid" onSubmit={createProject}><Field label="Artiste" required><SelectInput name="artistId" required><option value="">Choisir un artiste</option>{data.artists.rows.map((row) => <option key={row.id} value={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field><Field label="Producteur responsable" required><SelectInput name="producerUid" required><option value="">Choisir un producteur</option>{managerUsers.filter((entry) => entry.role === 'producer' && entry.active).map((entry) => <option key={entry.uid} value={entry.uid}>{entry.displayName}</option>)}</SelectInput></Field><Field label="Titre du projet" required><TextInput name="title" required placeholder="Titre du single ou de l’album" /></Field><Field label="Type de projet"><SelectInput name="type"><option value="single">Single</option><option value="ep">EP</option><option value="album">Album</option><option value="other">Autre</option></SelectInput></Field><Field label="Prix convenu (FCFA)"><TextInput name="priceXaf" type="number" min="0" step="1" defaultValue="0" /></Field><Field label="Date cible de livraison"><TextInput name="targetDate" type="date" /></Field><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Créer le projet</Button></div></form>}
       {modal === 'payment' && <form className="form-grid" onSubmit={createPayment}><Field label="Projet lié"><SelectInput name="projectId"><option value="">Sans projet lié</option>{data.projects.rows.map((row) => <option key={row.id} value={row.id}>{row.title} · {row.artistName}</option>)}</SelectInput></Field><Field label="Rendez-vous lié (acompte / solde)"><SelectInput name="appointmentId"><option value="">Aucun</option>{data.appointments.rows.filter((row) => !['cancelled', 'no_show'].includes(row.status)).map((row) => <option key={row.id} value={row.id}>{row.artistName} · {row.serviceName} · {formatDate(row.startsAt)}</option>)}</SelectInput></Field><Field label="Artiste (si paiement sans projet / rendez-vous)"><SelectInput name="artistId"><option value="">Choisir un artiste</option>{data.artists.rows.map((row) => <option key={row.id} value={row.id}>{row.stageName || row.fullName}</option>)}</SelectInput></Field><Field label="Montant encaissé (FCFA)" required><TextInput name="amountXaf" type="number" min="1" step="1" required placeholder="25000" /></Field><Field label="Frais externes directs déductibles (FCFA)"><TextInput name="directCostsXaf" type="number" min="0" step="1" defaultValue="0" /></Field><Field label="Somme collectée pour un tiers (FCFA)"><TextInput name="thirdPartyAmountXaf" type="number" min="0" step="1" defaultValue="0" /></Field><Field label="Mode de paiement"><SelectInput name="method"><option value="cash">Espèces</option><option value="mtn_momo">MTN Mobile Money</option><option value="orange_money">Orange Money</option><option value="transfer">Virement</option><option value="other">Autre</option></SelectInput></Field><Field label="Type de répartition"><SelectInput name="splitType"><option value="studio">Prestation du studio</option><option value="distribution">Service de distribution</option></SelectInput></Field><div className="span-two"><Field label="Référence (facultatif)"><TextInput name="reference" placeholder="Référence du reçu ou de la transaction" /></Field></div><p className="form-hint span-two">Le paiement sera inscrit comme validé. Les commissions sont réparties sur le cumul encaissé de ce projet et de cette version tarifaire, pour que les arrondis restent cohérents lors des acomptes successifs.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Valider le paiement</Button></div></form>}
       {modal === 'payment-claim' && <form className="form-grid" onSubmit={async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await action(async () => { const project = data.projects.rows.find((row) => row.id === String(form.get('projectId'))); await submitPaymentClaim(db!, { ownerUid: uid, amountXaf: Number(form.get('amountXaf')), method: String(form.get('method') || 'other') as any, reference: String(form.get('reference') || '').trim(), note: String(form.get('note') || '').trim(), projectId: project?.id, appointmentId: String(form.get('appointmentId') || '') || undefined, splitType: 'studio' }); }, 'Votre déclaration de paiement a été envoyée au studio pour vérification.'); }}><Field label="Projet concerné"><SelectInput name="projectId"><option value="">Non précisé</option>{data.projects.rows.map((row) => <option value={row.id} key={row.id}>{row.title}</option>)}</SelectInput></Field><Field label="Montant payé (FCFA)" required><TextInput name="amountXaf" type="number" min="1" step="1" required /></Field><Field label="Mode de paiement"><SelectInput name="method"><option value="mtn_momo">MTN Mobile Money</option><option value="orange_money">Orange Money</option><option value="cash">Espèces</option><option value="transfer">Virement</option><option value="other">Autre</option></SelectInput></Field><Field label="Référence de paiement" required><TextInput name="reference" required placeholder="Référence ou identifiant de transaction" /></Field><div className="span-two"><Field label="Commentaire"><TextArea name="note" rows={2} /></Field></div><p className="form-hint span-two">Cette déclaration n’est pas un paiement validé. Le manager doit vérifier la réception des fonds avant de l’enregistrer.</p><div className="modal-actions span-two"><Button onClick={() => setModal(null)}>Annuler</Button><Button type="submit" variant="primary" disabled={busy}>Envoyer pour vérification</Button></div></form>}
@@ -667,14 +725,35 @@ function TeamPage({ rows, onAdd }: { rows: Array<{ uid: string; displayName: str
   </>;
 }
 
-function ServicesPage({ role, rows, onAdd, onToggle }: { role: string; rows: Service[]; onAdd: () => void; onToggle: (row: Service) => void }) {
-  return <><PageHeader eyebrow="OFFRE DU STUDIO" title={role === 'client' ? 'Prestations disponibles' : 'Catalogue des prestations'} subtitle="Les services, leurs tarifs, les conditions d’acompte et les règles de répartition." action={role === 'manager' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Nouvelle prestation</Button> : undefined} />
-    <div className="service-grid">{rows.map((row) => <article className="service-card" key={row.id}><div className="service-symbol"><Music2 size={19} /></div><span className="service-category">{row.category}</span><h3>{row.name}</h3><p>{row.description || 'Prestation proposée par le studio.'}</p><div className="service-meta"><b>{formatXaf(row.priceXaf)}</b><small>{row.durationMinutes ? `${row.durationMinutes} min` : 'Durée à convenir'} · Acompte {row.depositPercent}%</small></div>{role === 'manager' && <div className="service-card-foot"><StatusPill value={row.isActive ? 'active' : 'archived'} /><button className="text-link" onClick={() => onToggle(row)}>{row.isActive ? 'Désactiver' : 'Réactiver'}</button></div>}</article>)}</div>
-    {!rows.length && <EmptyState title="Le catalogue est vide" text="Les prestations ajoutées par le manager apparaîtront ici." />}
+function ServicesPage({ role, rows, whatsappNumber, onBook, onAdd, onEdit, onToggle }: {
+  role: string; rows: Service[]; whatsappNumber: string;
+  onBook: (row: Service) => void; onAdd: () => void; onEdit: (row: Service) => void; onToggle: (row: Service) => void;
+}) {
+  const canManage = role === 'manager' || role === 'producer';
+  const whatsappDigits = String(whatsappNumber || '').replace(/\D/g, '');
+  return <><PageHeader eyebrow="OFFRE DU STUDIO" title={role === 'client' ? 'Prestations disponibles' : 'Catalogue des prestations'} subtitle={role === 'client' ? 'Choisissez un service, consultez son tarif et demandez votre séance en quelques étapes.' : 'Définissez les services, les tarifs, les remises et les conditions de règlement.'} action={canManage ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Nouvelle prestation</Button> : undefined} />
+    <div className="service-grid">{rows.filter((row) => role === 'client' ? row.isActive : true).map((row) => {
+      const discount = Math.max(0, Math.min(90, Number(row.discountPercent) || 0));
+      const finalPrice = Math.round(Number(row.priceXaf) * (100 - discount) / 100);
+      const deposit = Math.ceil(finalPrice * (Number(row.depositPercent) || 0) / 100);
+      return <article className="service-card" key={row.id}>
+        <div className="service-symbol"><Music2 size={19} /></div><span className="service-category">{row.category}</span><h3>{row.name}</h3><p>{row.description || 'Prestation proposée par le studio.'}</p>
+        <div className="service-meta"><div><b>{formatXaf(finalPrice)}</b>{discount > 0 && <small className="table-sub"><s>{formatXaf(row.priceXaf)}</s> · remise {discount} %</small>}</div><small>{row.durationMinutes ? `${row.durationMinutes} min` : 'Durée à convenir'} · Acompte {row.depositPercent}% ({formatXaf(deposit)})</small></div>
+        {role === 'client' && <div className="service-card-foot"><Button variant="primary" onClick={() => onBook(row)}>Réserver cette prestation</Button></div>}
+        {canManage && <div className="service-card-foot"><StatusPill value={row.isActive ? 'active' : 'archived'} /><button className="text-link" onClick={() => onEdit(row)}>Modifier</button><button className="text-link" onClick={() => onToggle(row)}>{row.isActive ? 'Désactiver' : 'Réactiver'}</button></div>}
+      </article>;
+    })}</div>
+    {!rows.filter((row) => role === 'client' ? row.isActive : true).length && <EmptyState title="Le catalogue est vide" text="Les prestations ajoutées par le manager ou le producteur apparaîtront ici." />}
+    {role === 'client' && whatsappDigits && <p className="small-note">Une question avant de réserver ? <a className="text-link" href={`https://wa.me/${whatsappDigits}`} target="_blank" rel="noreferrer">Contacter le studio sur WhatsApp ↗</a></p>}
   </>;
 }
 
-function AppointmentsPage({ role, rows, producers = [], onAdd, onConfirm, onCancel, onReschedule, onProgress }: { role: string; rows: Appointment[]; producers?: Array<{ uid: string; displayName: string }>; onAdd: () => void; onConfirm: (row: Appointment, producerUid?: string) => void; onCancel: (row: Appointment) => void; onReschedule: (row: Appointment) => void; onProgress: (row: Appointment, status: string) => void }) {
+function AppointmentsPage({ role, rows, producers = [], onAdd, onPayDeposit, onConfirm, onCancel, onReschedule, onProgress }: {
+  role: string; rows: Appointment[]; producers?: Array<{ uid: string; displayName: string }>;
+  onAdd: () => void; onPayDeposit: (row: Appointment, paymentType: 'deposit' | 'full') => void;
+  onConfirm: (row: Appointment, producerUid?: string) => void; onCancel: (row: Appointment) => void;
+  onReschedule: (row: Appointment) => void; onProgress: (row: Appointment, status: string) => void;
+}) {
   const [view, setView] = useState<'day' | 'week' | 'month' | 'list'>('list');
   const [anchor, setAnchor] = useState(() => new Date());
   const [producerAssignments, setProducerAssignments] = useState<Record<string, string>>({});
@@ -686,9 +765,33 @@ function AppointmentsPage({ role, rows, producers = [], onAdd, onConfirm, onCanc
   if (view === 'week') end.setDate(end.getDate() + 7);
   if (view === 'month') end.setMonth(end.getMonth() + 1);
   const visibleRows = view === 'list' ? rows : rows.filter((row) => row.startsAt && row.startsAt.toDate() >= start && row.startsAt.toDate() < end);
-  return <><PageHeader eyebrow="CALENDRIER DU STUDIO" title={role === 'client' ? 'Mes rendez-vous' : role === 'producer' ? 'Mon calendrier de séances' : 'Rendez-vous'} subtitle="Demandes, confirmations et séances planifiées. Les créneaux confirmés sont protégés contre les chevauchements." action={role !== 'producer' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Demander un rendez-vous' : 'Ajouter une demande'}</Button> : undefined} />
+  return <><PageHeader eyebrow="CALENDRIER DU STUDIO" title={role === 'client' ? 'Mes rendez-vous' : role === 'producer' ? 'Mon calendrier de séances' : 'Rendez-vous'} subtitle="Demandes, acomptes et séances planifiées. Le créneau n’est réservé qu’après confirmation du studio." action={role !== 'producer' ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Demander un rendez-vous' : 'Ajouter une demande'}</Button> : undefined} />
     <div className="calendar-toolbar"><div className="view-switch">{(['day', 'week', 'month', 'list'] as const).map((item) => <button key={item} className={view === item ? 'active' : ''} onClick={() => setView(item)}>{({ day: 'Jour', week: 'Semaine', month: 'Mois', list: 'Liste' } as const)[item]}</button>)}</div><div className="calendar-date-nav"><button onClick={() => setAnchor(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - (view === 'week' ? 7 : view === 'month' ? 30 : 1)))}>←</button><b>{view === 'month' ? anchor.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: 'Africa/Douala' }) : formatDate(anchor)}</b><button onClick={() => setAnchor(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + (view === 'week' ? 7 : view === 'month' ? 30 : 1)))}>→</button><button className="today-button" onClick={() => setAnchor(new Date())}>Aujourd’hui</button></div></div>
-    <div className="table-panel"><div className="table-head"><b>{visibleRows.length} rendez-vous {view === 'list' ? 'chargés' : 'dans cette période'}</b><span>Heure locale : Africa/Douala · Créneaux de 15 minutes</span></div><div className="table-scroll"><table><thead><tr><th>DATE & HEURE</th><th>ARTISTE</th><th>PRESTATION</th><th>ACOMPTE</th><th>INTERVENANT</th><th>STATUT</th><th>ACTIONS</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.id}><td><b>{formatDate(row.startsAt)}</b><small className="table-sub">{row.startsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })} – {row.endsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })}</small></td><td>{row.artistName}</td><td>{row.serviceName}<small className="table-sub">{formatXaf(row.servicePriceXaf)}</small></td><td>{formatXaf(row.depositExpectedXaf)}<small className="table-sub">Payé : {formatXaf(row.amountPaidXaf || 0)}</small></td><td>{role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) ? <select className="mini-select" value={producerAssignments[row.id] ?? row.producerUid ?? ''} onChange={(event) => setProducerAssignments((current) => ({ ...current, [row.id]: event.target.value }))}><option value="">À affecter</option>{producers.map((producer) => <option key={producer.uid} value={producer.uid}>{producer.displayName}</option>)}</select> : row.producerName || 'À affecter'}</td><td><StatusPill value={row.status} /></td><td><div className="row-actions">{role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) && <button className="mini-action primary-mini" onClick={() => onConfirm(row, producerAssignments[row.id] || row.producerUid || undefined)} disabled={!navigator.onLine || !(producerAssignments[row.id] || row.producerUid)}>Confirmer</button>}{role === 'manager' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onReschedule(row)} disabled={!navigator.onLine}>Déplacer</button>}{role === 'producer' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onProgress(row, 'in_progress')}>Démarrer</button>}{(role === 'producer' || role === 'manager') && row.status === 'in_progress' && <button className="mini-action" onClick={() => onProgress(row, 'completed')}>Terminer</button>}{(role === 'manager' || (role === 'client' && row.status === 'requested')) && !['cancelled', 'completed'].includes(row.status) && <button className="icon-button danger-icon" title="Annuler" onClick={() => onCancel(row)}><X size={15} /></button>}</div></td></tr>)}</tbody></table></div>{!rows.length && <EmptyState title="Aucun rendez-vous enregistré" text="Les demandes du site et les séances planifiées seront affichées ici." />}</div>
+    <div className="table-panel"><div className="table-head"><b>{visibleRows.length} rendez-vous {view === 'list' ? 'chargés' : 'dans cette période'}</b><span>Heure locale : Africa/Douala · Créneaux de 15 minutes</span></div><div className="table-scroll"><table><thead><tr><th>DATE & HEURE</th><th>ARTISTE</th><th>PRESTATION</th><th>ACOMPTE</th><th>INTERVENANT</th><th>STATUT</th><th>ACTIONS</th></tr></thead><tbody>{visibleRows.map((row) => {
+      const paid = Number(row.amountPaidXaf) || 0;
+      const deposit = Number(row.depositExpectedXaf) || 0;
+      const total = Number(row.servicePriceXaf) || 0;
+      const remaining = Math.max(0, total - paid);
+      const depositDue = Math.max(0, deposit - paid);
+      const payable = role === 'client' && !['cancelled', 'completed', 'no_show'].includes(row.status);
+      return <tr key={row.id}>
+        <td><b>{formatDate(row.startsAt)}</b><small className="table-sub">{row.startsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })} – {row.endsAt?.toDate().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Douala', hour: '2-digit', minute: '2-digit' })}</small></td>
+        <td>{row.artistName}</td>
+        <td>{row.serviceName}<small className="table-sub">Prix : {formatXaf(total)}{row.discountPercent ? ` · remise ${row.discountPercent}%` : ''}</small></td>
+        <td>{formatXaf(deposit)}<small className="table-sub">Payé : {formatXaf(paid)} · Reste : {formatXaf(remaining)}</small></td>
+        <td>{role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) ? <select className="mini-select" value={producerAssignments[row.id] ?? row.producerUid ?? ''} onChange={(event) => setProducerAssignments((current) => ({ ...current, [row.id]: event.target.value }))}><option value="">À affecter</option>{producers.map((producer) => <option key={producer.uid} value={producer.uid}>{producer.displayName}</option>)}</select> : row.producerName || 'À affecter'}</td>
+        <td><StatusPill value={row.status} /></td>
+        <td><div className="row-actions">
+          {payable && depositDue > 0 && <button className="mini-action primary-mini" onClick={() => onPayDeposit(row, 'deposit')} disabled={!navigator.onLine}>Payer l’acompte · {formatXaf(depositDue)}</button>}
+          {payable && row.allowFullPayment !== false && remaining > 0 && (depositDue === 0 || remaining > depositDue) && <button className="mini-action" onClick={() => onPayDeposit(row, 'full')} disabled={!navigator.onLine}>{paid > 0 ? 'Régler le solde' : 'Tout régler'} · {formatXaf(remaining)}</button>}
+          {role === 'manager' && ['requested', 'awaiting_deposit', 'rescheduled'].includes(row.status) && <button className="mini-action primary-mini" onClick={() => onConfirm(row, producerAssignments[row.id] || row.producerUid || undefined)} disabled={!navigator.onLine || !(producerAssignments[row.id] || row.producerUid)}>Confirmer</button>}
+          {role === 'manager' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onReschedule(row)} disabled={!navigator.onLine}>Déplacer</button>}
+          {role === 'producer' && row.status === 'confirmed' && <button className="mini-action" onClick={() => onProgress(row, 'in_progress')}>Démarrer</button>}
+          {(role === 'producer' || role === 'manager') && row.status === 'in_progress' && <button className="mini-action" onClick={() => onProgress(row, 'completed')}>Terminer</button>}
+          {(role === 'manager' || (role === 'client' && ['requested', 'awaiting_deposit'].includes(row.status))) && !['cancelled', 'completed'].includes(row.status) && <button className="icon-button danger-icon" title="Annuler" onClick={() => onCancel(row)}><X size={15} /></button>}
+        </div></td>
+      </tr>;
+    })}</tbody></table></div>{!rows.length && <EmptyState title="Aucun rendez-vous enregistré" text="Les demandes du site et les séances planifiées seront affichées ici." />}</div>
   </>;
 }
 
@@ -699,11 +802,16 @@ function ProjectsPage({ role, rows, onAdd, onStep, onNote }: { role: string; row
   </>;
 }
 
-function PaymentsPage({ role, rows, submissions, onAdd, onProcess, onReverse }: { role: string; rows: Array<Payment | PaymentReceipt>; submissions: any[]; onAdd: () => void; onProcess: (row: any) => void; onReverse: (row: Payment) => void }) {
+function PaymentsPage({ role, rows, submissions, attempts = [], onVerifyAttempt, onAdd, onProcess, onReverse }: {
+  role: string; rows: Array<Payment | PaymentReceipt>; submissions: any[]; attempts?: any[];
+  onVerifyAttempt: (row: any) => void; onAdd: () => void; onProcess: (row: any) => void; onReverse: (row: Payment) => void;
+}) {
   const total = moneySum(rows.filter((row) => row.status === 'approved'), (row) => row.amountXaf);
   const reversed = moneySum(rows.filter((row) => Boolean(row.reversesPaymentId)), (row) => Math.abs(row.amountXaf));
-  return <><PageHeader eyebrow="SUIVI DES ENCAISSEMENTS" title={role === 'client' ? 'Mes paiements' : 'Paiements & facturation'} subtitle="Historique des paiements, acomptes, déclarations et soldes enregistrés." action={<Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Déclarer un paiement' : 'Enregistrer un paiement'}</Button>} />
+  const activeAttempts = attempts.filter((row) => ['INITIATING', 'PENDING', 'REVIEW_REQUIRED'].includes(String(row.status)));
+  return <><PageHeader eyebrow="SUIVI DES ENCAISSEMENTS" title={role === 'client' ? 'Mes paiements' : 'Paiements & facturation'} subtitle="Historique des paiements, acomptes, déclarations et transactions Fapshi vérifiées." action={<Button variant="primary" onClick={onAdd}><Plus size={16} /> {role === 'client' ? 'Déclarer un paiement' : 'Enregistrer un paiement'}</Button>} />
     <div className="finance-summary"><div><span>Total encaissé</span><b>{formatXaf(total)}</b><small>Écritures validées affichées</small></div><div><span>Corrections / annulations</span><b>{formatXaf(reversed)}</b><small>Conservées dans le registre</small></div><div><span>Déclarations en attente</span><b>{submissions.filter((row) => row.status === 'pending').length}</b><small>À vérifier par le manager</small></div></div>
+    {role === 'manager' && activeAttempts.length > 0 && <section className="panel pending-panel"><div className="panel-heading"><div><span className="eyebrow">FAPSHI</span><h3>Transactions en cours ou à contrôler</h3></div><StatusPill value="pending" /></div>{activeAttempts.map((row) => <div className="pending-row" key={row.id}><div><b>{row.artistName || 'Artiste'} · {formatXaf(row.amountXaf)}</b><small>{row.serviceName || 'Prestation'} · {row.transId || 'Référence en préparation'} · {row.status === 'REVIEW_REQUIRED' ? 'Contrôle manuel nécessaire' : 'Statut fournisseur à vérifier'}</small></div>{row.status === 'PENDING' && <Button variant="primary" onClick={() => onVerifyAttempt(row)}>Interroger Fapshi</Button>}{row.status === 'REVIEW_REQUIRED' && <StatusPill value="to_approve" />}</div>)}</section>}
     {role === 'manager' && submissions.length > 0 && <section className="panel pending-panel"><div className="panel-heading"><div><span className="eyebrow">À VÉRIFIER</span><h3>Déclarations de paiement</h3></div><StatusPill value="pending" /></div>{submissions.map((row) => <div className="pending-row" key={row.id}><div><b>{formatXaf(row.amountXaf)}</b><small>{row.method} · {row.reference || 'Sans référence'} · {row.ownerUid.slice(0, 8)}…</small></div><Button variant="primary" onClick={() => onProcess(row)}>Vérifier & enregistrer</Button></div>)}</section>}
     <div className="table-panel"><div className="table-head"><b>Registre des paiements ({rows.length})</b><span>Les écritures validées ne sont jamais supprimées.</span></div><div className="table-scroll"><table><thead><tr><th>DATE</th><th>ARTISTE</th><th>RÉFÉRENCE</th><th>MONTANT</th>{role === 'manager' && <th>FRAIS DIRECTS</th>}{role === 'manager' && <th>SOMMES TIERS</th>}{role === 'manager' && <th>BASE PARTAGEABLE</th>}<th>MODE</th><th>STATUT</th><th></th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{formatDate(row.paidAt || row.createdAt)}</td><td>{row.artistName}</td><td>{row.reference || '—'}</td><td><b>{formatXaf(row.amountXaf)}</b></td>{role === 'manager' && <td>{formatXaf((row as Payment).directCostsXaf || 0)}</td>}{role === 'manager' && <td>{formatXaf((row as Payment).thirdPartyAmountXaf || 0)}</td>}{role === 'manager' && <td>{formatXaf((row as Payment).shareableAmountXaf || 0)}</td>}<td>{paymentMethodLabel(row.method)}</td><td><StatusPill value={row.status} /></td><td>{role === 'manager' && row.status === 'approved' && <button className="text-link" onClick={() => onReverse(row as Payment)}>Corriger</button>}</td></tr>)}</tbody></table></div>{!rows.length && <EmptyState title="Aucun paiement enregistré" text="Les paiements validés ou vos déclarations apparaîtront ici." />}</div>
     {role === 'client' && submissions.length > 0 && <p className="small-note">Vos déclarations sont en attente de vérification. Elles ne sont pas comptabilisées comme recettes tant que le manager ne les a pas validées.</p>}
@@ -748,11 +856,26 @@ function ReportsPage({ data }: { data: ReturnType<typeof useWorkspaceData> }) {
   </>;
 }
 
-function SettingsPage({ rates, onInitialize, onSave, onClearCache }: { rates: RateSet | null; onInitialize: () => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onClearCache: () => void }) {
-  return <><PageHeader eyebrow="CONFIGURATION DU STUDIO" title="Paramètres" subtitle="Règles opérationnelles, répartition des recettes et confidentialité locale." />
-    {!rates ? <section className="settings-card"><div className="settings-card-header"><div><h3>Répartitions financières</h3><p>Initialisez les taux convenus dans le cahier des charges V1.</p></div><Button variant="primary" onClick={onInitialize}><CheckCircle2 size={16} /> Initialiser les taux V1</Button></div><div className="rate-defaults"><div><b>Studio</b><span>Manager 25 % · Producteur 50 % · Réserve 25 %</span></div><div><b>Distribution</b><span>Manager 70 % · Producteur 20 % · Réserve 10 %</span></div></div></section> : <form className="settings-card" onSubmit={onSave}><div className="settings-card-header"><div><h3>Répartitions des recettes</h3><p>Version actuellement chargée : <b>{rates.version}</b>. Les nouveaux taux ne modifient pas les paiements antérieurs.</p></div><Button type="submit" variant="primary"><Check size={16} /> Enregistrer les taux</Button></div><div className="rate-groups"><RateGroup title="Prestations ordinaires du studio" prefix="studio" value={rates.studio} /><RateGroup title="Distribution numérique" prefix="dist" value={rates.distribution} /></div><div className="threshold-field"><label>Seuil d’autorisation des dépenses exceptionnelles (FCFA)<input className="field" name="expenseThreshold" type="number" min="0" step="1" defaultValue={rates.expenseApprovalThresholdXaf ?? ''} /></label><p className="small-note">Laissez vide pour imposer deux validations distinctes des dépenses signalées comme exceptionnelles. Au-dessus du seuil défini, une validation du manager et une du producteur sont requises.</p></div><div className="form-hint">La somme doit être exactement égale à 100 % pour chaque catégorie. Les calculs sont en montants XAF entiers et le reliquat est affecté à la réserve.</div></form>}
+function SettingsPage({ rates, canManageRates, bookingPolicy, onSaveBookingPolicy, onInitialize, onSave, onClearCache }: {
+  rates: RateSet | null; canManageRates: boolean; bookingPolicy: BookingPolicy;
+  onSaveBookingPolicy: (event: FormEvent<HTMLFormElement>) => void;
+  onInitialize: () => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onClearCache: () => void;
+}) {
+  return <><PageHeader eyebrow="CONFIGURATION DU STUDIO" title="Paramètres" subtitle="Conditions de réservation, offres commerciales et règles financières du studio." />
+    <form key={`${bookingPolicy.defaultDepositPercent}-${bookingPolicy.defaultDiscountPercent}-${bookingPolicy.allowFullPaymentDefault}-${bookingPolicy.whatsappNumber}`} className="settings-card" onSubmit={onSaveBookingPolicy}>
+      <div className="settings-card-header"><div><h3>Réservations et paiements</h3><p>Ces réglages servent de valeurs par défaut. Chaque prestation peut ensuite avoir ses propres conditions.</p></div><Button type="submit" variant="primary"><Check size={16} /> Enregistrer</Button></div>
+      <div className="form-grid">
+        <Field label="Acompte par défaut (%)"><TextInput name="defaultDepositPercent" type="number" min="0" max="100" step="1" defaultValue={bookingPolicy.defaultDepositPercent} required /></Field>
+        <Field label="Remise par défaut (%)"><TextInput name="defaultDiscountPercent" type="number" min="0" max="90" step="1" defaultValue={bookingPolicy.defaultDiscountPercent} required /></Field>
+        <div className="span-two"><Field label="Numéro WhatsApp du studio"><TextInput name="whatsappNumber" type="tel" defaultValue={bookingPolicy.whatsappNumber} placeholder="+2376XXXXXXXX" /></Field></div>
+        <label className="check-row span-two"><input type="checkbox" name="allowFullPaymentDefault" defaultChecked={bookingPolicy.allowFullPaymentDefault} /><span>Autoriser par défaut le règlement intégral en ligne (chaque prestation peut désactiver cette option)</span></label>
+      </div>
+      <p className="form-hint">Le montant final remisé et le montant d’acompte sont enregistrés dans chaque réservation. Une modification ultérieure ne change pas les conditions d’une réservation déjà envoyée.</p>
+    </form>
+    {canManageRates && (!rates ? <section className="settings-card"><div className="settings-card-header"><div><h3>Répartitions financières</h3><p>Initialisez les taux convenus dans le cahier des charges V1.</p></div><Button variant="primary" onClick={onInitialize}><CheckCircle2 size={16} /> Initialiser les taux V1</Button></div><div className="rate-defaults"><div><b>Studio</b><span>Manager 25 % · Producteur 50 % · Réserve 25 %</span></div><div><b>Distribution</b><span>Manager 70 % · Producteur 20 % · Réserve 10 %</span></div></div></section> : <form className="settings-card" onSubmit={onSave}><div className="settings-card-header"><div><h3>Répartitions des recettes</h3><p>Version actuellement chargée : <b>{rates.version}</b>. Les nouveaux taux ne modifient pas les paiements antérieurs.</p></div><Button type="submit" variant="primary"><Check size={16} /> Enregistrer les taux</Button></div><div className="rate-groups"><RateGroup title="Prestations ordinaires du studio" prefix="studio" value={rates.studio} /><RateGroup title="Distribution numérique" prefix="dist" value={rates.distribution} /></div><div className="threshold-field"><label>Seuil d’autorisation des dépenses exceptionnelles (FCFA)<input className="field" name="expenseThreshold" type="number" min="0" step="1" defaultValue={rates.expenseApprovalThresholdXaf ?? ''} /></label><p className="small-note">Laissez vide pour imposer deux validations distinctes des dépenses signalées comme exceptionnelles. Au-dessus du seuil défini, une validation du manager et une du producteur sont requises.</p></div><div className="form-hint">La somme doit être exactement égale à 100 % pour chaque catégorie. Les calculs sont en montants XAF entiers et le reliquat est affecté à la réserve.</div></form>)}
+    {!canManageRates && <p className="small-note">Les répartitions des recettes restent modifiables uniquement par le manager principal.</p>}
     <section className="settings-card"><div className="settings-card-header"><div><h3>Cache hors connexion</h3><p>La persistance IndexedDB doit être réservée à un appareil personnel. Les appareils non approuvés utilisent le cache mémoire.</p></div><StatusPill value={typeof localStorage !== 'undefined' && localStorage.getItem('mhb_trusted_device') === 'yes' ? 'active' : 'pending'} /></div><div className="settings-actions"><Button onClick={onClearCache} variant="danger">Effacer le cache local et recharger</Button><span className="small-note">Sur un appareil partagé, déconnectez-vous et effacez les données locales du navigateur.</span></div></section>
-    <section className="settings-card"><div className="settings-card-header"><div><h3>Fuseau et devise</h3><p>Fuseau d’affichage : Africa/Douala · Devise : franc CFA (XAF).</p></div><span className="setting-fixed">Valeurs du cahier des charges</span></div></section>
+    <section className="settings-card"><div className="settings-card-header"><div><h3>Fuseau et devise</h3><p>Fuseau d’affichage : Africa/Douala · Devise : franc CFA (XAF).</p></div><span className="setting-fixed">Valeurs du studio</span></div></section>
   </>;
 }
 
@@ -849,5 +972,5 @@ function AccountProfilePage({ uid, displayName, email, photoURL, onSaved, onErro
 }
 
 function paymentMethodLabel(value: string): string {
-  return ({ cash: 'Espèces', mtn_momo: 'MTN MoMo', orange_money: 'Orange Money', transfer: 'Virement', other: 'Autre' } as Record<string, string>)[value] || value;
+  return ({ cash: 'Espèces', mtn_momo: 'MTN MoMo', orange_money: 'Orange Money', transfer: 'Virement', fapshi: 'Fapshi · Mobile Money', other: 'Autre' } as Record<string, string>)[value] || value;
 }

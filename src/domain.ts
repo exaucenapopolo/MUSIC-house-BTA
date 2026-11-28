@@ -2,7 +2,7 @@ import type { Timestamp } from 'firebase/firestore';
 
 export type Role = 'manager' | 'producer' | 'client';
 export type SplitType = 'studio' | 'distribution';
-export type PaymentMethod = 'cash' | 'mtn_momo' | 'orange_money' | 'transfer' | 'other';
+export type PaymentMethod = 'cash' | 'mtn_momo' | 'orange_money' | 'transfer' | 'fapshi' | 'other';
 export type AppointmentStatus =
   | 'requested' | 'awaiting_deposit' | 'confirmed' | 'in_progress'
   | 'completed' | 'cancelled' | 'no_show' | 'rescheduled';
@@ -45,6 +45,8 @@ export interface Service {
   priceXaf: number;
   durationMinutes?: number;
   depositPercent: number;
+  discountPercent?: number;
+  allowFullPayment?: boolean;
   splitType: SplitType;
   isActive: boolean;
   createdAt?: Timestamp;
@@ -58,6 +60,9 @@ export interface Appointment {
   serviceId?: string;
   serviceName: string;
   servicePriceXaf: number;
+  serviceOriginalPriceXaf?: number;
+  discountPercent?: number;
+  allowFullPayment?: boolean;
   depositExpectedXaf: number;
   amountPaidXaf: number;
   producerUid?: string;

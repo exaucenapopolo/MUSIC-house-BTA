@@ -44,21 +44,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       try {
         let token = await user.getIdTokenResult();
-        if (String(user.email || '').toLowerCase() === 'exaucenapopolo2@gmail.com' && token.claims.role !== 'manager') {
-          try {
-            const response = await fetch('/api/studio', {
-              method: 'POST',
-              headers: { Authorization: 'Bearer ' + await user.getIdToken(), 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'bootstrapManager' }),
-            });
-            const payload = await response.json().catch(() => ({}));
-            if (response.ok && payload.success) token = await user.getIdTokenResult(true);
-            else if (response.status === 403) console.warn('[MUSIC HOUSE MANAGER]', payload.error || 'Vérifiez le compte manager.');
-          } catch (bootstrapError) {
-            console.warn('[MUSIC HOUSE MANAGER]', bootstrapError instanceof Error ? bootstrapError.message : bootstrapError);
+        const isPrimaryManager = String(user.email || '').trim().toLowerCase() === 'exaucenapopolo2@gmail.com';
+        const userRef = doc(firestore, 'users', user.uid);
+        const existingProfile = await getDoc(userRef);
+
+        // Reconcile this one explicitly authorized account with Firebase Admin.
+        // Never silently downgrade the studio owner to a client when provisioning fails.
+        if (isPrimaryManager && (token.claims.role !== 'manager' || !existingProfile.exists() || existingProfile.data().active !== true)) {
+          const response = await fetch('/api/studio', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + await user.getIdToken(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'bootstrapManager' }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || !payload.success) {
+            throw new Error(payload.error || 'Le rôle manager ne peut pas être initialisé. Vérifiez la vérification de l’adresse et la configuration Firebase Admin dans Vercel.');
+          }
+          token = await user.getIdTokenResult(true);
+          if (token.claims.role !== 'manager') {
+            throw new Error('Firebase n’a pas confirmé le rôle manager. Déconnectez-vous puis reconnectez-vous après vérification de la configuration.');
           }
         }
-        const userDoc = await getDoc(doc(firestore, 'users', user.uid));
+        const userDoc = await getDoc(userRef);
+        if (isPrimaryManager && token.claims.role !== 'manager') {
+          throw new Error('Cette adresse est réservée au manager principal, mais son rôle administratif n’a pas été confirmé. Aucun accès artiste ne sera affiché.');
+        }
         const claimRole = token.claims.role;
         const profileData = userDoc.exists() ? userDoc.data() : {};
         const role: Role = claimRole === 'manager' || claimRole === 'producer' ? claimRole : 'client';
@@ -118,19 +128,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       provider.setCustomParameters({ prompt: 'select_account' });
       const credential = await signInWithPopup(firebaseAuth, provider);
       const account = credential.user;
-      const managerCandidate = String(account.email || '').toLowerCase() === 'exaucenapopolo2@gmail.com';
+      const managerCandidate = String(account.email || '').trim().toLowerCase() === 'exaucenapopolo2@gmail.com';
       let token = await account.getIdTokenResult();
-      if (managerCandidate && token.claims.role !== 'manager') {
+      const userRef = doc(firestore, 'users', account.uid);
+      const existingProfile = await getDoc(userRef);
+      if (managerCandidate && (token.claims.role !== 'manager' || !existingProfile.exists() || existingProfile.data().active !== true)) {
         const response = await fetch('/api/studio', {
           method: 'POST',
           headers: { Authorization: 'Bearer ' + await account.getIdToken(), 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'bootstrapManager' }),
         });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.success) throw new Error(payload.error || 'Le compte manager ne peut pas être initialisé.');
+        if (!response.ok || !payload.success) {
+          throw new Error(payload.error || 'Le rôle manager ne peut pas être initialisé. Vérifiez la vérification de l’adresse et la configuration Firebase Admin dans Vercel.');
+        }
         token = await account.getIdTokenResult(true);
+        if (token.claims.role !== 'manager') throw new Error('Le serveur Firebase n’a pas confirmé le rôle manager.');
       }
-      const userRef = doc(firestore, 'users', account.uid);
       const snapshot = await getDoc(userRef);
       const role: Role = token.claims.role === 'manager' || token.claims.role === 'producer' ? token.claims.role : 'client';
       if (!snapshot.exists() && !managerCandidate) {

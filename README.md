@@ -9,13 +9,13 @@ Application web de gestion du studio, des artistes, des rendez-vous, des product
 - Espaces distincts : pilotage manager, espace de production et portail artiste/client.
 - Profils artistes, catalogue des prestations et tarifs XAF, demandes de rendez-vous, affectation d'un producteur, calendrier et verrouillage atomique des créneaux confirmés.
 - Projets musicaux et étapes de production, notes internes d'équipe, progression client contrôlée.
-- Paiements saisis et vérifiés manuellement, déclarations de paiement client, justificatifs clients, corrections par écritures inverses.
+- Paiements Mobile Money par Fapshi, vérification serveur du statut fournisseur, contrôle du montant et de la référence, acomptes et soldes rattachés aux réservations ; déclarations manuelles conservées pour les autres modes.
 - Dépenses, validation manager, co-signature manager/producteur pour les dépenses exceptionnelles ou au-dessus du seuil choisi.
 - Répartitions studio 25 % / 50 % / 25 % et distribution 70 % / 20 % / 10 %, historique des versions, écritures de commissions et réserve.
 - Suivi manuel des sorties de distribution, notifications internes, rapports CSV et vues adaptées aux mobiles.
 - Cache Firestore mémoire par défaut et cache IndexedDB multi-onglets seulement lorsque l'utilisateur marque l'appareil comme personnel/de confiance.
 
-La V1 n'active aucune passerelle de paiement, intégration automatique de plateformes musicales, stockage audio ni service tiers payant. Une sortie n'est dite publiée que lorsque le manager met manuellement son statut à `published`.
+Les paiements Fapshi sont intégrés pour les acomptes et soldes des prestations du studio. Aucune intégration automatique de plateformes musicales ni aucun stockage audio n'est activé. Une sortie n'est dite publiée que lorsque le manager met manuellement son statut à `published`.
 
 ## Prérequis
 
@@ -65,6 +65,23 @@ Configurez les variables suivantes dans Vercel côté serveur, jamais avec le pr
 
 Les événements suivants déclenchent des e-mails : création d'un compte artiste, demande de rendez-vous reçue, rendez-vous validé par le manager, demande de publication soumise, évolution du statut de publication et message direct envoyé par le manager à un artiste. Les e-mails sont envoyés par une fonction serveur ; la clé Resend n'est jamais transmise au navigateur.
 
+### Paiements Fapshi et acomptes
+
+Les paiements en ligne utilisent le même contrat d'intégration que Pata. Configurez dans Vercel, en **variables serveur privées** :
+
+- `FAPSHI_API_USER`
+- `FAPSHI_SECRET_KEY`
+- `FAPSHI_WEBHOOK_URL` : `https://votre-domaine.com/api/payments`
+- `FAPSHI_WEBHOOK_SECRET` : secret partagé avec l'en-tête `x-wh-secret` du webhook.
+
+Dans le tableau de bord Fapshi, configurez également l'URL du webhook ci-dessus et le même secret `x-wh-secret`. Ajouter uniquement la variable URL dans Vercel ne configure pas le webhook chez Fapshi. L'API de paiement est regroupée dans une seule fonction serveur : `POST /api/payments` (création et vérification) et reçoit aussi le webhook Fapshi.
+
+Le lien de paiement est créé côté serveur avec `POST https://live.fapshi.com/initiate-pay`. Au retour du navigateur et lors du webhook, le serveur interroge de nouveau `GET https://live.fapshi.com/payment-status/{transId}`. Le statut doit être `SUCCESSFUL` et le montant, l'identifiant externe et le compte doivent correspondre à la tentative sauvegardée dans Firestore. Le webhook et la page de retour ne sont jamais acceptés comme preuve de paiement à eux seuls. Une transaction non confirmée reste en attente ; un montant incohérent est mis en contrôle manuel au lieu d'être crédité.
+
+Les réglages commerciaux se trouvent dans **Paramètres du studio** : acompte par défaut de 50 %, remise par défaut, possibilité d'autoriser ou non le paiement intégral et numéro WhatsApp. Chaque prestation peut avoir son propre prix, sa remise, son pourcentage d'acompte et l'autorisation de paiement intégral. Le prix final, la remise et l'acompte sont figés dans la réservation : changer ensuite le catalogue ne réécrit pas les conditions déjà acceptées. L'artiste voit les prestations actives, peut demander une réservation puis payer l'acompte ou le solde lorsqu'il est dû.
+
+Une réservation n'est confirmée et le créneau n'est verrouillé qu'après la vérification de l'acompte par le fournisseur et la validation du manager. Le manager peut toujours accorder une dérogation explicite avec motif. Les paiements Fapshi confirmés sont reportés dans `payments`, `paymentReceipts`, `allocationBalances` et `commissionEntries` ; les frais Fapshi sont séparés du montant net utilisé pour la répartition.
+
 ### Connexion Google et compte manager
 
 Activez le fournisseur **Google** dans Firebase Console → Authentication → Sign-in method, en conservant **Email/Password**. Ajoutez le domaine de production dans Authentication → Settings → Authorized domains.
@@ -82,6 +99,10 @@ FIREBASE_PROJECT_ID=music-house-bta
 FIREBASE_SERVICE_ACCOUNT_KEY=
 MUSIC_HOUSE_MANAGER_EMAIL=exaucenapopolo2@gmail.com
 APP_URL=https://votre-domaine.com
+FAPSHI_API_USER=
+FAPSHI_SECRET_KEY=
+FAPSHI_WEBHOOK_URL=https://votre-domaine.com/api/payments
+FAPSHI_WEBHOOK_SECRET=
 ```
 
 `FIREBASE_SERVICE_ACCOUNT_KEY` contient le JSON du compte de service du projet **music-house-bta**. Il doit provenir de ce projet Firebase, être conservé uniquement dans les variables serveur Vercel et ne jamais être ajouté au dépôt. Les clés du projet Pata ne doivent pas être utilisées pour administrer un autre projet Firebase.
@@ -89,7 +110,7 @@ APP_URL=https://votre-domaine.com
 ## Configuration Firebase requise par le propriétaire
 
 1. Ouvrir le projet existant **`music-house-bta`** dans Firebase Console.
-2. Dans **Authentication → Sign-in method**, activer **Email/Password**. C'est indispensable pour que les formulaires d'inscription et de connexion puissent créer puis authentifier les comptes.
+2. Dans **Authentication → Sign-in method**, activer **Email/Password** et **Google**. C'est indispensable pour les formulaires d'inscription, la connexion et l'accès manager.
 3. Dans **Firestore Database**, vérifier que la base native existe. Si elle n'existe pas, la créer et choisir sa région (ce choix doit être confirmé par le propriétaire).
 4. La configuration Web fournie est déjà intégrée par défaut et dans `.env.example`. Aucune clé privée n'est requise dans le navigateur.
 5. Déployer les règles et index avec les commandes ci-dessous. Attendre la construction des index avant les tests fonctionnels dépendant de ceux-ci.
@@ -176,7 +197,7 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 - L'identifiant du projet et la configuration Web sont fournis (`music-house-bta`). La région Firestore et le domaine public final doivent encore être confirmés par le propriétaire.
 - Le compte manager principal est identifié par `exaucenapopolo2@gmail.com`. Les producteurs sont invités depuis le tableau de bord manager ou ajoutés manuellement avec le script Admin.
 - Le seuil de dépense exceptionnelle est configurable dans Paramètres. La valeur initiale est volontairement vide ; le manager doit la définir s'il souhaite un seuil numérique. Les dépenses explicitement marquées exceptionnelles exigent toujours les deux validations.
-- Les paiements sont saisis manuellement après vérification réelle des fonds. La V1 ne vérifie pas automatiquement les comptes Mobile Money ou bancaires.
+- Les transactions Fapshi doivent être configurées avec les quatre variables serveur ci-dessus et le webhook doit être enregistré dans le tableau de bord Fapshi. Les transactions réelles ne sont pas certifiées tant qu'un essai de bout en bout n'a pas été exécuté avec les secrets du compte.
 - Les conditions légales/texte contractuel final, logo officiel, coordonnées publiques, canaux de support et domaine définitif sont des éléments du propriétaire à renseigner avant ouverture publique.
 
 ## Structure du dépôt
@@ -186,7 +207,7 @@ La persistance Web conserve les données sur le navigateur ; ne l'activez jamais
 - `firestore.indexes.json` : index composites utilisés par les requêtes.
 - `scripts/set-role.ts` : attribution sécurisée des rôles via Admin SDK.
 - `tests/` : tests financiers et tests de règles via Firebase Emulator.
-- `.env.example` : configuration Web publique préremplie ; aucune clé privée.
+- `.env.example` : configuration Web publique préremplie et noms des variables serveur attendues ; les secrets restent vides.
 - `firebase.json` / `vercel.json` : configuration d'hébergement et d'émulateur.
 
 ## Licence

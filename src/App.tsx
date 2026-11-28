@@ -1,7 +1,8 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { ArrowLeft, AudioLines, Eye, EyeOff, LockKeyhole, Mail, UserRound } from 'lucide-react';
 import { useAuth } from './auth';
+import { callPaymentApi } from './paymentApi';
 import { firebaseConfigured } from './firebase';
 import Workspace from './Workspace';
 
@@ -128,6 +129,58 @@ function ForgotPage() {
   </div></AuthFrame>;
 }
 
+function PaymentReturnPage() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const attemptId = new URLSearchParams(window.location.search).get('attemptId') || '';
+  const [status, setStatus] = useState<'checking' | 'CONFIRMED' | 'PENDING' | 'FAILED' | 'EXPIRED' | 'REVIEW_REQUIRED' | 'ERROR'>('checking');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function verify() {
+    if (!attemptId) { setStatus('ERROR'); setError('La référence de paiement est absente. Ouvrez vos rendez-vous pour vérifier le règlement.'); return; }
+    setBusy(true); setError(''); setStatus('checking');
+    try {
+      const result = await callPaymentApi('verify', { attemptId });
+      const next = String(result.status || 'PENDING') as typeof status;
+      setStatus(['CONFIRMED', 'PENDING', 'FAILED', 'EXPIRED', 'REVIEW_REQUIRED'].includes(next) ? next : 'PENDING');
+    } catch (cause) {
+      setStatus('ERROR');
+      setError(cause instanceof Error ? cause.message : 'La vérification du paiement a échoué.');
+    } finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    if (user?.uid && attemptId) void verify();
+    else if (user?.uid && !attemptId) { setStatus('ERROR'); setError('Référence de paiement manquante.'); }
+  }, [user?.uid, attemptId]);
+
+  const title = status === 'CONFIRMED' ? 'Paiement confirmé'
+    : status === 'PENDING' || status === 'checking' ? 'Vérification en cours'
+    : status === 'REVIEW_REQUIRED' ? 'Vérification manuelle nécessaire'
+    : status === 'FAILED' ? 'Paiement non abouti'
+    : status === 'EXPIRED' ? 'Session de paiement expirée' : 'Vérification impossible';
+  const message = status === 'CONFIRMED' ? 'Fapshi a confirmé la transaction. Le paiement est ajouté à votre historique et votre acompte est pris en compte.'
+    : status === 'PENDING' || status === 'checking' ? 'Le retour de Fapshi ne suffit pas à confirmer un paiement. Le studio attend le statut final transmis par le fournisseur.'
+    : status === 'REVIEW_REQUIRED' ? 'La transaction est bien signalée comme réussie par Fapshi, mais son montant nécessite un contrôle du manager avant son intégration au registre.'
+    : status === 'FAILED' ? 'Fapshi a indiqué que la transaction a échoué. Aucun acompte n’a été comptabilisé.'
+    : status === 'EXPIRED' ? 'La session de paiement a expiré. Vous pouvez relancer le règlement depuis vos rendez-vous.'
+    : error || 'La transaction n’a pas pu être vérifiée pour le moment.';
+  return <div className="screen-loader"><div className="auth-card payment-return-card">
+    <span className="eyebrow">MUSIC HOUSE BTA · FAPSHI</span>
+    <h2>{title}</h2>
+    <p className="muted">{message}</p>
+    {status === 'ERROR' && error && <div className="alert error">{error}</div>}
+    {status === 'CONFIRMED' && <div className="alert success">Votre paiement est enregistré.</div>}
+    {(status === 'PENDING' || status === 'checking') && <p className="small-note">Ne payez pas une seconde fois tant que cette transaction n’a pas reçu son statut définitif.</p>}
+    {status === 'REVIEW_REQUIRED' && <p className="small-note">Le montant n’a pas été ajouté au solde de votre réservation. Contactez le studio pour la régularisation.</p>}
+    <button className="button primary full" type="button" onClick={() => void verify()} disabled={busy}>
+      {busy ? 'Vérification…' : 'Vérifier à nouveau'}
+    </button>
+    <button className="button secondary full" type="button" onClick={() => navigate('/appointments')}>Retour à mes rendez-vous</button>
+  </div></div>;
+}
+
 function Protected({ children }: { children: ReactNode }) {
   const { user, profile, loading, error, logout } = useAuth();
   if (loading) return <div className="screen-loader"><div className="loader-mark"><AudioLines /></div><p>Préparation de votre espace…</p></div>;
@@ -144,6 +197,7 @@ export default function App() {
     <Route path="/login" element={loading ? <div className="screen-loader">Chargement…</div> : profile ? <Navigate to="/" replace /> : <LoginPage />} />
     <Route path="/register" element={profile ? <Navigate to="/" replace /> : <RegisterPage />} />
     <Route path="/forgot-password" element={<ForgotPage />} />
+    <Route path="/payment-return" element={<Protected><PaymentReturnPage /></Protected>} />
     <Route path="/*" element={<Protected><Workspace /></Protected>} />
   </Routes>;
 }

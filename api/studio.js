@@ -193,28 +193,34 @@ async function handleRequest(req, context, body) {
   }
 
   if (action === 'appointmentRequested') {
-    if (context.role !== 'client') {
-      const error = new Error('Seul un artiste connecté peut envoyer une demande de rendez-vous.');
-      error.status = 403; throw error;
-    }
     const appointmentId = String(body.appointmentId || '');
     const snap = await db.collection('appointments').doc(appointmentId).get();
-    if (!snap.exists || snap.data().ownerUid !== context.uid) {
-      const error = new Error('La demande de rendez-vous ne vous appartient pas.');
-      error.status = 403; throw error;
+    if (!snap.exists) {
+      const error = new Error('Rendez-vous introuvable.');
+      error.status = 404; throw error;
     }
     const appointment = snap.data();
-    const contact = await getArtistContact(context, appointment.artistId, context.uid);
+    if (context.role === 'client' && appointment.ownerUid !== context.uid) {
+      const error = new Error('Cette demande de rendez-vous ne vous appartient pas.');
+      error.status = 403; throw error;
+    }
+    if (context.role !== 'client' && context.role !== 'manager') {
+      const error = new Error('Seul le manager peut créer un rendez-vous pour un artiste.');
+      error.status = 403; throw error;
+    }
+    const contact = await getArtistContact(context, appointment.artistId, appointment.ownerUid);
+    const recipient = contact.email || (context.role === 'client' ? context.email : '');
     const details = [['Artiste', appointment.artistName || contact.name], ['Prestation', appointment.serviceName],
       ['Date souhaitée', dateLabel(appointment.startsAt)], ['Statut', 'Demande reçue']];
-    await Promise.all([
-      sendEmail(context.email, 'Votre demande de rendez-vous a bien été reçue',
-        emailHtml('Nous avons bien reçu votre demande', 'Votre demande est enregistrée. Le studio vérifie la disponibilité et vous adressera une confirmation dès que le rendez-vous aura été validé.', details, APP_URL, 'Suivre ma demande'),
-        'studio-appointment-request-artist-' + appointmentId),
-      sendManagerEmail('Nouvelle demande de rendez-vous', 'Un artiste vient de soumettre une demande de séance. Elle attend la vérification du manager.', details,
-        'studio-appointment-request-manager-' + appointmentId),
-    ]);
-    return { sent: true };
+    const tasks = [];
+    if (recipient) tasks.push(sendEmail(recipient, 'Votre demande de rendez-vous a bien été reçue',
+      emailHtml('Votre demande de rendez-vous est enregistrée', 'Le studio vérifie la disponibilité et vous adressera une confirmation dès que le rendez-vous aura été validé.', details, APP_URL, 'Suivre ma demande'),
+      'studio-appointment-request-artist-' + appointmentId));
+    if (context.role === 'client') tasks.push(sendManagerEmail('Nouvelle demande de rendez-vous',
+      'Un artiste vient de soumettre une demande de séance. Elle attend la vérification du manager.', details,
+      'studio-appointment-request-manager-' + appointmentId));
+    await Promise.all(tasks);
+    return { sent: tasks.length > 0, skipped: !recipient };
   }
 
   if (action === 'appointmentConfirmed') {
