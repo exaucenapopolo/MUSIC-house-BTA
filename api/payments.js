@@ -103,6 +103,133 @@ async function fetchFapshiStatus(transId) {
   if (!response.ok) throw httpError(clean(data.message || data.error || 'Impossible de vérifier la transaction Fapshi.', 260), 502);
   return data;
 }
+
+function appointmentLockIds(appointment) {
+  const start = appointment.startsAt && typeof appointment.startsAt.toDate === 'function'
+    ? appointment.startsAt.toDate() : new Date(appointment.startsAt);
+  const end = appointment.endsAt && typeof appointment.endsAt.toDate === 'function'
+    ? appointment.endsAt.toDate() : new Date(appointment.endsAt);
+  const slotMs = 15 * 60 * 1000;
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start
+      || start.getTime() % slotMs !== 0 || end.getTime() % slotMs !== 0) {
+    throw httpError('Les horaires du rendez-vous ne permettent pas de confirmer ce créneau.', 409);
+  }
+  const resourceId = clean(appointment.resourceId || 'studio', 80);
+  const ids = [];
+  for (let cursor = start.getTime(); cursor < end.getTime(); cursor += slotMs) {
+    ids.push('slot_' + encodeURIComponent(resourceId) + '_' + Math.floor(cursor / slotMs));
+  }
+  return { ids, resourceId, start, end };
+}
+
+function escapeMailHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character]));
+}
+
+function getResendFrom() {
+  const configured = String(process.env.RESEND_FROM_EMAIL || '').trim().replace(/,\s*$/, '');
+  if (!configured || /[\r\n]/.test(configured)) throw new Error('RESEND_FROM_EMAIL est absente ou invalide.');
+  const pattern = /^[A-Z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/i;
+  if (pattern.test(configured)) return 'MUSIC HOUSE BTA <' + configured + '>';
+  const match = configured.match(/^([^<>\r\n]{1,80})<\s*([^<>\s]+)\s*>$/);
+  if (match && pattern.test(match[2])) return match[1].trim() + ' <' + match[2] + '>';
+  throw new Error('RESEND_FROM_EMAIL doit appartenir à un domaine vérifié.');
+}
+
+async function sendResendMessage(to, subject, html, idempotencyKey) {
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  if (!apiKey) throw new Error('RESEND_API_KEY est absente de la configuration serveur.');
+  if (!to || !String(to).includes('@')) throw new Error('Aucune adresse e-mail valide pour cet artiste.');
+  const headers = { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
+  if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey).slice(0, 256);
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST', headers,
+    body: JSON.stringify({ from: getResendFrom(), to: [String(to).trim()], subject, html }),
+    cache: 'no-store', signal: AbortSignal.timeout(12000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(clean(data.message || data.error || 'Resend a répondu avec le statut ' + response.status, 360));
+  return data.id || null;
+}
+
+function paidAppointmentEmailHtml(appointment, studioName, paidAmount, whatsappUrl) {
+  const service = escapeMailHtml(appointment.serviceName || 'Prestation du studio');
+  const intro = 'Votre paiement a été vérifié par notre prestataire. Votre présence est maintenant confirmée et le créneau est réservé.';
+  const rows = [
+    ['Studio', studioName],
+    ['Prestation', appointment.serviceName || 'Prestation du studio'],
+    ['Date et heure', appointment.startsAt && typeof appointment.startsAt.toDate === 'function'
+      ? new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Douala', dateStyle: 'full', timeStyle: 'short' }).format(appointment.startsAt.toDate())
+      : 'À confirmer'],
+    ['Acompte reçu', Number(paidAmount).toLocaleString('fr-FR') + ' FCFA'],
+    ['Montant restant', Math.max(0, (Number(appointment.servicePriceXaf) || 0) - (Number(appointment.amountPaidXaf) || 0)).toLocaleString('fr-FR') + ' FCFA'],
+  ];
+  const table = rows.map(([label, value]) => '<tr><td style="padding:10px 0;color:#64748b;font-size:12px;border-bottom:1px solid #edf0ec">' +
+    escapeMailHtml(label) + '</td><td align="right" style="padding:10px 0;color:#17231f;font-size:13px;font-weight:700;border-bottom:1px solid #edf0ec">' +
+    escapeMailHtml(value) + '</td></tr>').join('');
+  const whatsapp = whatsappUrl ? '<p style="margin:20px 0 0;color:#59645d;font-size:13px"><a href="' + escapeMailHtml(whatsappUrl) + '" style="color:#a86a39;font-weight:700">Contacter le studio sur WhatsApp</a> pour toute question.</p>' : '';
+  return '<!doctype html><html lang="fr"><meta charset="utf-8"><body style="margin:0;background:#f5f3ef;font-family:Arial,Helvetica,sans-serif;padding:28px 12px;color:#20231f"><table role="presentation" width="100%"><tr><td align="center"><table width="600" style="max-width:600px;width:100%;background:#fff;border:1px solid #e9e4dc;border-radius:16px;padding:28px"><tr><td><div style="font-size:11px;letter-spacing:2px;color:#a86a39;font-weight:700">MUSIC HOUSE BTA</div><h1 style="margin:18px 0 12px;font-size:24px">Votre rendez-vous est confirmé</h1><p style="font-size:14px;line-height:1.75;color:#4b554d">' + intro + '</p><table width="100%" cellspacing="0" cellpadding="0" style="background:#faf9f6;padding:10px 16px;border-radius:10px">' + table + '</table><p style="margin:22px 0 0"><a href="' + escapeMailHtml(APP_URL + '/appointments') + '" style="display:inline-block;padding:13px 20px;background:#a86a39;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">Consulter mes rendez-vous</a></p>' + whatsapp + '<p style="margin:24px 0 0;color:#59645d;font-size:13px;line-height:1.7">Merci de votre confiance.<br><strong>L’équipe MUSIC HOUSE BTA</strong></p></td></tr></table></td></tr></table></body></html>';
+}
+
+async function sendAppointmentPaidConfirmation(services, attemptId) {
+  const db = services.db;
+  const attemptRef = db.collection('paymentAttempts').doc(attemptId);
+  const attemptSnap = await attemptRef.get();
+  if (!attemptSnap.exists) return { sent: false, skipped: true };
+  const attempt = attemptSnap.data() || {};
+  if (attempt.confirmationEmailSentAt) return { sent: true, alreadySent: true };
+  if (attempt.status !== 'CONFIRMED' || !attempt.appointmentId) return { sent: false, skipped: true };
+  const appointmentSnap = await db.collection('appointments').doc(String(attempt.appointmentId)).get();
+  if (!appointmentSnap.exists) throw new Error('Rendez-vous introuvable pour le mail de confirmation.');
+  const appointment = appointmentSnap.data() || {};
+  let email = '';
+  try {
+    const user = await services.auth.getUser(String(attempt.ownerUid || appointment.ownerUid));
+    email = String(user.email || '').trim();
+  } catch { /* fall back to the stored profile */ }
+  if (!email && attempt.ownerUid) {
+    const userSnap = await db.collection('users').doc(String(attempt.ownerUid)).get();
+    if (userSnap.exists) email = String(userSnap.data().email || '').trim();
+  }
+  if (!email && appointment.artistId) {
+    const artistSnap = await db.collection('artists').doc(String(appointment.artistId)).get();
+    if (artistSnap.exists) email = String(artistSnap.data().email || '').trim();
+  }
+  if (!email || !email.includes('@')) {
+    await attemptRef.set({ confirmationEmailError: 'Aucune adresse e-mail associée à cet artiste.', updatedAt: services.FieldValue.serverTimestamp() }, { merge: true });
+    return { sent: false, skipped: true, reason: 'Adresse e-mail de l’artiste introuvable.' };
+  }
+  const [studioSnap, policySnap] = await Promise.all([
+    db.collection('studios').doc('music-house-bta').get(),
+    db.collection('settings').doc('bookingPolicy').get(),
+  ]);
+  const studio = studioSnap.exists ? studioSnap.data() : {};
+  const policy = policySnap.exists ? policySnap.data() : {};
+  const studioName = clean(studio.name || 'Young Forever Records', 100);
+  const phone = String(studio.whatsappNumber || policy.whatsappNumber || '').replace(/\D/g, '');
+  const whatsappMessage = 'Bonjour MUSIC HOUSE BTA, mon acompte pour « ' + clean(appointment.serviceName, 100) + ' » est confirmé. Je vous contacte au sujet de mon rendez-vous.';
+  const whatsappUrl = phone ? 'https://wa.me/' + phone + '?text=' + encodeURIComponent(whatsappMessage) : '';
+  try {
+    const providerId = await sendResendMessage(email, 'Votre rendez-vous est confirmé · MUSIC HOUSE BTA',
+      paidAppointmentEmailHtml(appointment, studioName, Number(attempt.amountXaf) || 0, whatsappUrl),
+      'studio-payment-confirmed-' + attemptId);
+    await attemptRef.set({
+      confirmationEmailSentAt: services.FieldValue.serverTimestamp(),
+      confirmationEmailProviderId: providerId || null,
+      confirmationEmailError: null,
+      updatedAt: services.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return { sent: true, providerId };
+  } catch (error) {
+    const message = clean(error && error.message || error, 360);
+    await attemptRef.set({ confirmationEmailError: message, updatedAt: services.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {});
+    console.error('[MUSIC HOUSE APPOINTMENT CONFIRMATION EMAIL]', message);
+    return { sent: false, error: message };
+  }
+}
+
 async function sendJson(req, res, status, payload) {
   return res.status(status).json(payload);
 }
@@ -116,7 +243,16 @@ async function initiatePayment(context, body) {
   if (!appointmentSnap.exists) throw httpError('Rendez-vous introuvable.', 404);
   const appointment = appointmentSnap.data() || {};
   if (appointment.ownerUid !== context.uid) throw httpError('Ce rendez-vous ne vous appartient pas.', 403);
-  if (['cancelled', 'no_show'].includes(String(appointment.status))) throw httpError('Ce rendez-vous ne peut plus être payé.');
+  if (!['awaiting_deposit', 'confirmed', 'in_progress'].includes(String(appointment.status))) {
+    throw httpError('Le manager doit d’abord accepter votre demande et définir l’acompte avant le paiement.');
+  }
+  if (appointment.status === 'awaiting_deposit' && appointment.depositDeadlineAt) {
+    const deadline = typeof appointment.depositDeadlineAt.toDate === 'function'
+      ? appointment.depositDeadlineAt.toDate().getTime() : new Date(appointment.depositDeadlineAt).getTime();
+    if (Number.isFinite(deadline) && deadline > 0 && deadline < Date.now()) {
+      throw httpError('Le délai de paiement de cet acompte est dépassé. Contactez le studio pour proposer un nouveau créneau.');
+    }
+  }
   const price = amount(appointment.servicePriceXaf, 'Prix de la prestation');
   const paid = Math.max(0, Number(appointment.amountPaidXaf) || 0);
   const remaining = Math.max(0, price - paid);
@@ -284,6 +420,28 @@ async function settleSuccessfulPayment(context, attemptId, attemptData, provider
     const balanceSnap = await transaction.get(balanceRef);
     const balance = balanceSnap.exists() ? balanceSnap.data() : {};
     const previousBase = Number(balance.shareableBaseXaf) || 0;
+    const amountPaidAfter = currentPaid + grossAmount;
+    const depositTarget = Math.max(0, Number(appointment.depositExpectedXaf) || 0);
+    const confirmsNow = appointment.status === 'awaiting_deposit' && amountPaidAfter >= depositTarget;
+    const lockData = confirmsNow ? appointmentLockIds(appointment) : null;
+    const paymentLockRefs = lockData ? lockData.ids.map((id) => db.collection('appointmentLocks').doc(id)) : [];
+    const paymentLockSnapshots = lockData ? await Promise.all(paymentLockRefs.map((ref) => transaction.get(ref))) : [];
+    const slotConflict = paymentLockSnapshots.find((lock) => lock.exists && lock.data().appointmentId !== attemptData.appointmentId
+      && (lock.data().status === 'confirmed'
+        || (lock.data().status === 'pending_payment' && (() => {
+          const expiry = lock.data().expiresAt && typeof lock.data().expiresAt.toDate === 'function'
+            ? lock.data().expiresAt.toDate().getTime() : new Date(lock.data().expiresAt || 0).getTime();
+          return Number.isFinite(expiry) && expiry > Date.now();
+        })())));
+    if (slotConflict) {
+      transaction.update(attemptRef, {
+        status: 'REVIEW_REQUIRED', providerVerified: true, providerStatus: 'SUCCESSFUL',
+        reviewReason: 'Le créneau a été réservé par une autre demande pendant le paiement. Vérification manager et régularisation requises.',
+        providerRevenueXaf: netAmount, providerFeeXaf: grossAmount - netAmount,
+        verifiedAt: services.FieldValue.serverTimestamp(), updatedAt: services.FieldValue.serverTimestamp(),
+      });
+      return { reviewRequired: true, paymentId: null };
+    }
     const previousShares = {
       manager: Number(balance.managerShareXaf) || 0,
       producer: Number(balance.producerShareXaf) || 0,
@@ -360,17 +518,27 @@ async function settleSuccessfulPayment(context, attemptId, attemptData, provider
       updatedAt: services.FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    const amountPaidAfter = currentPaid + grossAmount;
-    const depositTarget = Math.max(0, Number(appointment.depositExpectedXaf) || 0);
     const nextStatus = appointment.status === 'confirmed' || appointment.status === 'in_progress'
       ? appointment.status
-      : amountPaidAfter >= depositTarget ? 'requested' : 'awaiting_deposit';
+      : confirmsNow ? 'confirmed' : 'awaiting_deposit';
     transaction.update(appointmentRef, {
       amountPaidXaf: amountPaidAfter,
       status: nextStatus,
+      ...(confirmsNow ? { confirmedAt: services.FieldValue.serverTimestamp() } : {}),
       lastPaymentId: paymentRef.id,
       updatedAt: services.FieldValue.serverTimestamp(),
     });
+    if (lockData && confirmsNow) {
+      paymentLockRefs.forEach((ref) => transaction.set(ref, {
+        appointmentId: attemptData.appointmentId,
+        resourceId: lockData.resourceId,
+        startsAt: appointment.startsAt,
+        endsAt: appointment.endsAt,
+        status: 'confirmed',
+        confirmedAt: services.FieldValue.serverTimestamp(),
+        updatedAt: services.FieldValue.serverTimestamp(),
+      }, { merge: true }));
+    }
     transaction.update(attemptRef, {
       status: 'CONFIRMED',
       providerStatus: 'SUCCESSFUL',
@@ -383,8 +551,8 @@ async function settleSuccessfulPayment(context, attemptId, attemptData, provider
     });
     transaction.set(db.collection('notifications').doc(), {
       recipientUid: attemptData.ownerUid,
-      title: 'Paiement Fapshi confirmé',
-      message: 'Votre règlement de ' + grossAmount.toLocaleString('fr-FR') + ' FCFA pour « ' + clean(appointment.serviceName || 'votre prestation', 100) + ' » a été confirmé.',
+      title: confirmsNow ? 'Rendez-vous confirmé' : 'Paiement Fapshi confirmé',
+      message: confirmsNow ? 'Votre acompte a été vérifié. Votre séance « ' + clean(appointment.serviceName || 'votre prestation', 100) + ' » est maintenant confirmée et le créneau est réservé.' : 'Votre règlement de ' + grossAmount.toLocaleString('fr-FR') + ' FCFA pour « ' + clean(appointment.serviceName || 'votre prestation', 100) + ' » a été confirmé.',
       kind: 'payment_validated',
       createdBy: 'fapshi',
       createdAt: services.FieldValue.serverTimestamp(),
@@ -413,7 +581,10 @@ async function verifyAttempt(services, attemptId) {
   const snap = await attemptRef.get();
   if (!snap.exists) throw httpError('Tentative de paiement introuvable.', 404);
   const attempt = snap.data() || {};
-  if (attempt.status === 'CONFIRMED') return { status: 'CONFIRMED', paymentId: attempt.paymentId || null };
+  if (attempt.status === 'CONFIRMED') {
+    const email = await sendAppointmentPaidConfirmation(services, safeId);
+    return { status: 'CONFIRMED', paymentId: attempt.paymentId || null, confirmationEmailSent: email.sent === true };
+  }
   if (attempt.status === 'REVIEW_REQUIRED') return { status: 'REVIEW_REQUIRED', reviewRequired: true };
   if (!attempt.transId) throw httpError('Fapshi n’a pas encore fourni de référence pour cette transaction.', 409);
   const providerData = await fetchFapshiStatus(attempt.transId);
@@ -430,6 +601,10 @@ async function verifyAttempt(services, attemptId) {
     return { status: ['FAILED', 'EXPIRED'].includes(providerStatus) ? providerStatus : 'PENDING' };
   }
   const result = await settleSuccessfulPayment({ services }, safeId, attempt, providerData);
+  if (result.status === 'CONFIRMED') {
+    const email = await sendAppointmentPaidConfirmation(services, safeId);
+    return { ...result, confirmationEmailSent: email.sent === true, confirmationEmailError: email.error || undefined };
+  }
   return result;
 }
 
