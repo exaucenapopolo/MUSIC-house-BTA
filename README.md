@@ -248,3 +248,28 @@ Les règles de sécurité appliquent les custom claims Firebase pour séparer le
 - Le bouton Envoyer un e-mail de test dans Paramètres envoie un message au compte manager connecté. Une erreur Resend affichée doit être corrigée (clé invalide, adresse expéditeur invalide, domaine non vérifié ou restrictions du compte).
 - Après modification de variables dans Vercel, déclenchez un nouveau déploiement de Production pour que les fonctions API chargent les nouvelles valeurs.
 - Toute clé de compte de service affichée ou partagée dans un chat doit être révoquée et remplacée par une nouvelle clé privée.
+
+
+## Présentation commerciale du studio et réservation V1
+
+### Catalogue illustré
+Chaque prestation peut maintenant contenir une affiche/photo Cloudinary, une description détaillée, des points clés, son tarif/remise, sa durée, le pourcentage d'acompte conseillé et un lien YouTube. Les liens YouTube reconnus (watch, youtu.be, Shorts, embed) sont convertis en lecteur YouTube-nocookie intégré sur la fiche de la prestation. Quand une affiche et une vidéo existent, les deux sont présentées dans la fiche.
+
+### Profil public du studio
+Le document `studios/music-house-bta` contient le nom, le slogan, la description, la ville, le logo, l'image de couverture, le numéro WhatsApp, les réalisations, l'équipe et la galerie. Seul le compte manager peut créer ou modifier ce profil ; les comptes connectés peuvent le consulter. Les photos sont hébergées sur Cloudinary. Ce premier profil est celui du studio MUSIC HOUSE BTA ; aucune création publique de studio n'est ouverte dans cette version.
+
+### Réservation avec acceptation et acompte
+Le parcours suit maintenant cet ordre :
+1. L'artiste sélectionne la prestation et propose une date/heure locale de Douala. La demande est enregistrée sans acompte exigible et sans confirmation du créneau.
+2. Le manager reçoit une notification dans son espace et un e-mail. Il peut accepter ou refuser la demande. Lors de l'acceptation, il choisit l'acompte en pourcentage (50 % proposé par défaut) et peut affecter un producteur.
+3. À l'acceptation, le créneau est placé en attente pendant 48 heures. Le client reçoit un e-mail avec le montant exact à payer et un lien vers ses rendez-vous.
+4. Après confirmation du paiement Fapshi, le serveur vérifie le statut fournisseur, confirme automatiquement le rendez-vous, verrouille le créneau et envoie un e-mail de confirmation au client. Un paiement non vérifié ne confirme jamais le rendez-vous.
+5. En cas de délai dépassé sans paiement, le créneau est libéré quand le client revient au paiement ; le studio peut proposer une autre date.
+
+Les e-mails d'acceptation, de refus et de confirmation incluent, lorsque le studio a renseigné son numéro WhatsApp, un lien de contact avec un message prérempli.
+
+### Dates et fuseau horaire
+Les champs `datetime-local` sont interprétés explicitement comme heure `Africa/Douala` (UTC+1). Les jours impossibles sont refusés et les heures sont alignées sur des créneaux de 15 minutes. Le test automatisé couvre le 29 novembre 2026 à 10 h, qui correspond à 09:00 UTC.
+
+### Audio des demandes de distribution
+Pour une nouvelle demande artiste de publication, le fichier audio est obligatoire ; la pochette est facultative. L'audio est envoyé dans Cloudinary avec le type de ressource `video` (Cloudinary prend en charge les fichiers audio sur cet endpoint) et apparaît dans le registre manager avec un lecteur intégré. Vérifiez dans le preset unsigned `afrikdigitalo_upload` que les formats audio/vidéo et une taille d'au moins 50 Mo sont autorisés ; sinon, créez un preset unsigned dédié à l'audio et renseignez-le dans `VITE_CLOUDINARY_UPLOAD_PRESET` ou adaptez la configuration du preset existant. Aucune piste audio n'est transférée dans Firestore.

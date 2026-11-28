@@ -84,8 +84,8 @@ export default function ServiceCatalog({ role, rows, whatsappNumber, onBook, onA
     {selected && <div className="modal-backdrop service-detail-backdrop" onMouseDown={(event)=>{if(event.target===event.currentTarget)setSelected(null);}}>
       <section className="service-detail-modal" role="dialog" aria-modal="true" aria-label={selected.name}>
         <header className="service-detail-header"><div><span className="eyebrow">PRESTATION DU STUDIO</span><h2>{selected.name}</h2></div><button className="icon-button" onClick={()=>setSelected(null)} aria-label="Fermer">×</button></header>
-        {selectedYoutube ? <div className="service-video-frame"><iframe src={selectedYoutube} title={'Présentation vidéo : ' + selected.name} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen/></div>
-          : selected.imageUrl ? <div className="service-detail-image"><img src={selected.imageUrl} alt={selected.name}/></div> : null}
+        {selected.imageUrl && <div className="service-detail-image"><img src={selected.imageUrl} alt={selected.name}/></div>}
+        {selectedYoutube && <div className="service-video-frame"><iframe src={selectedYoutube} title={'Présentation vidéo : ' + selected.name} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen/></div>}
         <div className="service-detail-content">
           <span className="service-category">{selected.category}</span>
           <p className="service-detail-description">{selected.description || 'Notre équipe vous accompagne pour donner vie à votre projet musical.'}</p>
