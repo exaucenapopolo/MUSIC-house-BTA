@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Activity, AlertCircle, Archive, ArrowDownRight, ArrowUpRight, AudioLines, Bell, Camera,
+  Activity, AlertCircle, Archive, ArrowDownRight, ArrowUpRight, AudioLines, Bell, Building2, Camera,
   CalendarDays, Check, CheckCircle2, CircleDollarSign, ClipboardList, Download,
   FileMusic, Filter, FolderKanban, Headphones, Home, LogOut, Menu, Music2, Plus,
   Mail, Radio, Search, Settings, ShieldCheck, SlidersHorizontal, Sparkles, UserPlus, UserRound,
@@ -12,7 +12,9 @@ import {
 } from 'firebase/firestore';
 import type { QueryConstraint } from 'firebase/firestore';
 import { useAuth } from './auth';
-import { uploadArtistAvatar } from './cloudinary';
+import { uploadArtistAvatar, uploadStudioImage, uploadStudioAudio } from './cloudinary';
+import ServiceCatalog, { getYouTubeEmbedUrl } from './ServiceCatalog';
+import StudioProfilePage from './StudioProfilePage';
 import { callStudioApi, notifyStudioEmail } from './studioApi';
 import { callPaymentApi } from './paymentApi';
 import { db, clearLocalFirestoreCache } from './firebase';
@@ -20,10 +22,10 @@ import { useLiveCollection } from './hooks';
 import {
   DEFAULT_PROJECT_STEPS, ROLE_LABELS, formatDate, formatXaf,
   type Artist, type Appointment, type CommissionEntry, type Expense, type MusicProject,
-  type NotificationItem, type Payment, type PaymentReceipt, type RateSet, type Service, type SplitType,
+  type NotificationItem, type Payment, type PaymentReceipt, type RateSet, type Service, type SplitType, type StudioProfile,
 } from './domain';
 import {
-  cancelAppointment, confirmAppointment, buildAppointmentWindow, rescheduleAppointment, updateAppointmentProgress,
+  cancelAppointment, buildAppointmentWindow, rescheduleAppointment, updateAppointmentProgress, toDoualaDateTimeInput,
 } from './booking';
 import {
   createExpense, getRateSet, initializeBusinessSettings,
@@ -31,13 +33,14 @@ import {
   submitPaymentClaim, updateBusinessRates,
 } from './services';
 
- type SectionKey = 'dashboard' | 'artists' | 'team' | 'appointments' | 'services' | 'projects' | 'payments' | 'expenses' | 'commissions' | 'distribution' | 'reports' | 'settings' | 'notifications' | 'profile' | 'calendar';
+ type SectionKey = 'dashboard' | 'artists' | 'team' | 'appointments' | 'services' | 'projects' | 'payments' | 'expenses' | 'commissions' | 'distribution' | 'reports' | 'settings' | 'notifications' | 'profile' | 'calendar' | 'studio';
  type NavItem = { key: SectionKey; label: string; icon: typeof Home; group?: string };
 
 const managerNav: NavItem[] = [
   { key: 'dashboard', label: 'Vue d’ensemble', icon: Home },
   { key: 'artists', label: 'Artistes & clients', icon: Users, group: 'STUDIO' },
   { key: 'team', label: 'Équipe du studio', icon: UserPlus },
+  { key: 'studio', label: 'Profil du studio', icon: Building2 },
   { key: 'appointments', label: 'Rendez-vous', icon: CalendarDays },
   { key: 'services', label: 'Prestations & tarifs', icon: SlidersHorizontal },
   { key: 'projects', label: 'Projets musicaux', icon: FolderKanban },
@@ -61,11 +64,13 @@ const producerNav: NavItem[] = [
   { key: 'commissions', label: 'Mon relevé', icon: Wallet },
   { key: 'notifications', label: 'Notifications', icon: Bell },
   { key: 'settings', label: 'Paramètres du studio', icon: Settings, group: 'STUDIO' },
+  { key: 'studio', label: 'Profil du studio', icon: Building2 },
   { key: 'profile', label: 'Mon profil', icon: UserRound },
 ];
 const clientNav: NavItem[] = [
   { key: 'dashboard', label: 'Mon accueil', icon: Home },
   { key: 'profile', label: 'Mon profil artistique', icon: UserRound, group: 'MON ESPACE' },
+  { key: 'studio', label: 'Notre studio', icon: Building2 },
   { key: 'services', label: 'Prestations', icon: SlidersHorizontal },
   { key: 'appointments', label: 'Mes rendez-vous', icon: CalendarDays },
   { key: 'projects', label: 'Mes projets', icon: FolderKanban },
@@ -87,6 +92,7 @@ function constraintsFor(role: string, uid: string, key: string): QueryConstraint
   if (key === 'distribution') return role === 'manager' ? [createdDesc] : role === 'client' ? [where('ownerUid', '==', uid), where('clientVisible', '==', true), createdDesc] : [];
   if (key === 'notifications') return [where('recipientUid', '==', uid), createdDesc];
   if (key === 'users') return role === 'manager' ? [createdDesc] : [];
+  if (key === 'studios') return [];
   return [];
 }
 
@@ -112,7 +118,8 @@ function useWorkspaceData(role: string, uid: string) {
   const distribution = useLiveCollection<any>(role === 'producer' ? null : 'distributionOrders', useMemo(() => constraints('distribution'), [role, uid]));
   const notifications = useLiveCollection<NotificationItem>('notifications', useMemo(() => constraints('notifications'), [role, uid]));
   const users = useLiveCollection<any>(role === 'manager' ? 'users' : null, useMemo(() => constraints('users'), [role, uid]));
-  return { artists, services, appointments, projects, payments, submissions, paymentAttempts, expenses, commissions, distribution, notifications, users };
+  const studios = useLiveCollection<StudioProfile>('studios', useMemo(() => constraints('studios'), []), 10);
+  return { artists, services, appointments, projects, payments, submissions, paymentAttempts, expenses, commissions, distribution, notifications, users, studios };
 }
 
 function Modal({ title, description, children, onClose }: { title: string; description?: string; children: ReactNode; onClose: () => void }) {
@@ -295,13 +302,23 @@ export default function Workspace() {
       const depositPercent = Number(form.get('depositPercent'));
       const discountPercent = Number(form.get('discountPercent') || 0);
       if (!Number.isSafeInteger(priceXaf) || priceXaf <= 0) throw new Error('Le tarif doit être un montant XAF entier supérieur à zéro.');
-      if (!Number.isInteger(depositPercent) || depositPercent < 0 || depositPercent > 100) throw new Error('Acompte invalide.');
+      if (!Number.isInteger(depositPercent) || depositPercent < 1 || depositPercent > 100) throw new Error('L’acompte conseillé doit être compris entre 1 et 100 %.');
       if (!Number.isInteger(discountPercent) || discountPercent < 0 || discountPercent > 90) throw new Error('La remise doit être comprise entre 0 et 90 %.');
+      const imageFile = form.get('imageFile') as File | null;
+      const removeImage = form.get('removeImage') === 'on';
+      const imageUrl = removeImage ? '' : imageFile && imageFile.size > 0
+        ? await uploadStudioImage(imageFile, 'services') : (editingService?.imageUrl || '');
+      const youtubeUrl = String(form.get('youtubeUrl') || '').trim();
+      if (youtubeUrl && !getYouTubeEmbedUrl(youtubeUrl)) throw new Error('Le lien YouTube doit être une URL valide de vidéo ou de Short YouTube.');
+      const highlights = String(form.get('highlights') || '').split('\n').map((item) => item.trim()).filter(Boolean).slice(0, 8);
+      const name = String(form.get('name') || '').trim();
+      if (name.length < 2) throw new Error('Indiquez un nom de prestation.');
       const serviceData = {
-        name: String(form.get('name') || '').trim(), category: String(form.get('category') || '').trim(),
+        name, category: String(form.get('category') || '').trim(),
         description: String(form.get('description') || '').trim(), priceXaf,
         durationMinutes: Number(form.get('durationMinutes')) || 0, depositPercent, discountPercent,
         allowFullPayment: form.get('allowFullPayment') === 'on',
+        imageUrl, youtubeUrl, highlights,
         splitType: form.get('splitType') === 'distribution' ? 'distribution' : 'studio',
         updatedBy: uid, updatedAt: serverTimestamp(),
       };
@@ -327,8 +344,8 @@ export default function Workspace() {
       const originalPriceXaf = Number(service.priceXaf);
       const discountPercent = Math.max(0, Math.min(90, Number(service.discountPercent) || 0));
       const servicePriceXaf = Math.round(originalPriceXaf * (100 - discountPercent) / 100);
-      const depositPercent = Number.isInteger(service.depositPercent) ? service.depositPercent : bookingPolicy.defaultDepositPercent;
-      const deposit = Math.ceil((servicePriceXaf * depositPercent) / 100);
+      const requestedDepositPercent = Number.isInteger(service.depositPercent) && service.depositPercent > 0
+        ? service.depositPercent : bookingPolicy.defaultDepositPercent;
       if (!Number.isSafeInteger(servicePriceXaf) || servicePriceXaf <= 0) throw new Error('Le prix final de cette prestation est invalide.');
       const assignedProducerUid = role === 'manager' ? String(form.get('producerUid') || '') || null : null;
       const appointmentRef = doc(collection(db!, 'appointments'));
@@ -338,20 +355,20 @@ export default function Workspace() {
         serviceId: service.id, serviceName: service.name,
         servicePriceXaf, serviceOriginalPriceXaf: originalPriceXaf, discountPercent,
         allowFullPayment: service.allowFullPayment !== false,
-        splitType: service.splitType, depositExpectedXaf: deposit, amountPaidXaf: 0,
+        splitType: service.splitType, depositExpectedXaf: 0, depositPercent: 0, requestedDepositPercent, amountPaidXaf: 0,
         ...(role === 'manager' ? {
           producerUid: assignedProducerUid,
           producerName: managerUsers.find((entry) => entry.uid === assignedProducerUid && entry.active)?.displayName || null,
         } : {}),
         resourceId: 'studio', ...windowTimes,
-        status: deposit > 0 ? 'awaiting_deposit' : 'requested',
+        status: 'requested',
         clientNote: String(form.get('clientNote') || '').trim(),
         createdBy: uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
       if (assignedProducerUid) batch.update(doc(db!, 'artists', artist.id), { producerUids: arrayUnion(assignedProducerUid), updatedAt: serverTimestamp() });
       await batch.commit();
       if (role === 'client' || role === 'manager') await notifyStudioEmail('appointmentRequested', { appointmentId: appointmentRef.id });
-    }, role === 'client' ? 'Votre demande a été envoyée. Vous pourrez régler l’acompte depuis vos rendez-vous.' : 'La demande de rendez-vous a été créée et transmise à l’artiste.');
+    }, role === 'client' ? 'Votre demande a été envoyée au studio. Vous recevrez un e-mail après étude par le manager.' : 'La demande a été ajoutée à la liste des rendez-vous à accepter.');
   }
 
   async function payAppointment(row: Appointment, paymentType: 'deposit' | 'full') {
@@ -379,7 +396,7 @@ export default function Workspace() {
       const defaultDepositPercent = Number(form.get('defaultDepositPercent'));
       const defaultDiscountPercent = Number(form.get('defaultDiscountPercent'));
       const whatsappNumber = String(form.get('whatsappNumber') || '').trim();
-      if (!Number.isInteger(defaultDepositPercent) || defaultDepositPercent < 0 || defaultDepositPercent > 100) throw new Error('L’acompte par défaut doit être compris entre 0 et 100 %.');
+      if (!Number.isInteger(defaultDepositPercent) || defaultDepositPercent < 1 || defaultDepositPercent > 100) throw new Error('L’acompte par défaut doit être compris entre 1 et 100 %.');
       if (!Number.isInteger(defaultDiscountPercent) || defaultDiscountPercent < 0 || defaultDiscountPercent > 90) throw new Error('La remise par défaut doit être comprise entre 0 et 90 %.');
       if (whatsappNumber && !/^\+?[0-9 ()-]{8,22}$/.test(whatsappNumber)) throw new Error('Le numéro WhatsApp doit être saisi au format international, par exemple +2376XXXXXXXX.');
       const next = { defaultDepositPercent, defaultDiscountPercent, allowFullPaymentDefault: form.get('allowFullPaymentDefault') === 'on', whatsappNumber, updatedBy: uid, updatedAt: serverTimestamp() };
@@ -476,12 +493,18 @@ export default function Workspace() {
       const projectId = String(form.get('projectId') || '').trim();
       const project = projectId ? data.projects.rows.find((row) => row.id === projectId) : null;
       if (role === 'client' && project && (project.ownerUid !== uid || project.status !== 'completed')) throw new Error('Vous pouvez uniquement associer un projet terminé qui vous appartient.');
+      const audioFile = form.get('audioFile') as File | null;
+      const coverFile = form.get('coverFile') as File | null;
+      if (role === 'client' && (!audioFile || audioFile.size <= 0)) throw new Error('Ajoutez le fichier audio de votre morceau pour transmettre une demande complète.');
+      const audioUrl = audioFile && audioFile.size > 0 ? await uploadStudioAudio(audioFile) : '';
+      const coverUrl = coverFile && coverFile.size > 0 ? await uploadStudioImage(coverFile, 'release-covers') : '';
       const orderRef = await addDoc(collection(db!, 'distributionOrders'), {
         ownerUid: role === 'client' ? uid : (artist.ownerUid || 'manual'), artistId: artist.id,
         artistName: artist.stageName || artist.fullName, projectId: project?.id || null,
         releaseTitle: String(form.get('releaseTitle') || '').trim(), releaseType: String(form.get('releaseType') || 'single'),
         distributor: String(form.get('distributor') || '').trim(), platforms: String(form.get('platforms') || '').trim(),
-        releaseUrl: String(form.get('releaseUrl') || '').trim(), releaseNotes: String(form.get('releaseNotes') || '').trim(),
+        releaseUrl: String(form.get('releaseUrl') || '').trim(), audioUrl, coverUrl,
+        releaseNotes: String(form.get('releaseNotes') || '').trim(),
         requestedReleaseDate: String(form.get('releaseDate') || '') || null,
         priceXaf: price, status: role === 'client' ? 'submitted' : 'draft', clientVisible: true,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(), createdBy: uid,
