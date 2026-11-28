@@ -21,7 +21,11 @@ export async function notifyStudioEmail(action: string, payload: Record<string, 
     await callStudioApi(action, payload);
     return true;
   } catch (error) {
-    console.warn('[MUSIC HOUSE EMAIL]', error instanceof Error ? error.message : error);
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[MUSIC HOUSE EMAIL]', message);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('music-house-email-error', { detail: message }));
+    }
     return false;
   }
 }

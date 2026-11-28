@@ -63,7 +63,7 @@ Configurez les variables suivantes dans Vercel côté serveur, jamais avec le pr
 - `RESEND_FROM_EMAIL` : expéditeur appartenant à un domaine vérifié dans Resend.
 - `APP_URL` : URL HTTPS publique de MUSIC HOUSE BTA utilisée dans les liens des e-mails.
 
-Les événements suivants déclenchent des e-mails : création d'un compte artiste, demande de rendez-vous reçue, rendez-vous validé par le manager, demande de publication soumise, évolution du statut de publication et message direct envoyé par le manager à un artiste. Les e-mails sont envoyés par une fonction serveur ; la clé Resend n'est jamais transmise au navigateur.
+Depuis **Paramètres**, le manager peut utiliser **Envoyer un e-mail de test** : la réponse précise si Resend accepte le message ou indique l’erreur du fournisseur ; le serveur vérifie aussi que le domaine expéditeur est enregistré et vérifié avec la clé configurée. Les événements suivants déclenchent des e-mails : création d'un compte artiste, demande de rendez-vous reçue, rendez-vous validé par le manager, demande de publication soumise, évolution du statut de publication et message direct envoyé par le manager à un artiste. Les e-mails sont envoyés par une fonction serveur ; la clé Resend n'est jamais transmise au navigateur.
 
 ### Paiements Fapshi et acomptes
 
@@ -97,6 +97,7 @@ RESEND_API_KEY=
 RESEND_FROM_EMAIL=
 FIREBASE_PROJECT_ID=music-house-bta
 FIREBASE_SERVICE_ACCOUNT_KEY=
+# Alias accepté si cette variable existe déjà dans Vercel : FIREBASE_SERVICE_ACCOUNT=
 MUSIC_HOUSE_MANAGER_EMAIL=exaucenapopolo2@gmail.com
 APP_URL=https://votre-domaine.com
 FAPSHI_API_USER=
@@ -105,7 +106,7 @@ FAPSHI_WEBHOOK_URL=https://votre-domaine.com/api/payments
 FAPSHI_WEBHOOK_SECRET=
 ```
 
-`FIREBASE_SERVICE_ACCOUNT_KEY` contient le JSON du compte de service du projet **music-house-bta**. Il doit provenir de ce projet Firebase, être conservé uniquement dans les variables serveur Vercel et ne jamais être ajouté au dépôt. Les clés du projet Pata ne doivent pas être utilisées pour administrer un autre projet Firebase.
+`FIREBASE_SERVICE_ACCOUNT_KEY` (nom recommandé) ou `FIREBASE_SERVICE_ACCOUNT` (ancien nom accepté) contient le JSON du compte de service du projet **music-house-bta**. Le JSON est analysé tel quel ; conservez les séquences `\\n` de la clé privée. Il doit provenir de ce projet Firebase, être conservé uniquement dans les variables serveur Vercel et ne jamais être ajouté au dépôt. Les clés du projet Pata ne doivent pas être utilisées pour administrer un autre projet Firebase.
 
 ## Configuration Firebase requise par le propriétaire
 
@@ -233,8 +234,17 @@ firebase login
 firebase deploy --only firestore:rules,firestore:indexes
 ```
 
-### Avertissement — règles temporaires
+### Sécurité Firestore
 
-Pour faciliter l'inscription, la connexion, les tests et le développement initial, les règles Firestore V1 sont volontairement simplifiées : **tout compte authentifié peut lire et écrire tous les documents**, tandis que les visiteurs non connectés sont refusés. Les rôles Manager/Producteur/Client restent présents dans l'application et dans les custom claims, mais ces règles temporaires ne séparent pas encore les données selon ces rôles.
+Les règles de sécurité appliquent les custom claims Firebase pour séparer les accès Manager, Producteur et Client. Les clients ne peuvent pas modifier le catalogue tarifaire, les montants des réservations ni les registres financiers. Les règles doivent être déployées dans le projet Firebase avec Firebase CLI ; un déploiement Vercel ne les publie pas.
 
-Ne pas conserver ces règles pour une ouverture publique, ni y stocker de vraies données financières ou privées partagées avec des comptes non fiables. Avant la mise en production, remplacer ce mode temporaire par des règles spécifiques à chaque collection et à chaque rôle, puis relancer `npm run test:rules`.
+
+### Dépannage Firebase Admin et Resend
+
+- Le serveur accepte les variables FIREBASE_SERVICE_ACCOUNT_KEY et FIREBASE_SERVICE_ACCOUNT. Si les deux existent, FIREBASE_SERVICE_ACCOUNT_KEY est prioritaire.
+- Collez le JSON complet du fichier téléchargé depuis Firebase Console comme valeur de la variable, sans ajouter de guillemets autour de tout le JSON et sans remplacer les séquences \\n à l’intérieur de private_key.
+- FIREBASE_PROJECT_ID doit être exactement music-house-bta et le compte de service doit appartenir à ce même projet.
+- Les e-mails utilisent les variables serveur RESEND_API_KEY et RESEND_FROM_EMAIL, identiques à Pata. L’adresse d’expédition doit appartenir à un domaine vérifié dans le compte Resend associé à cette clé.
+- Le bouton Envoyer un e-mail de test dans Paramètres envoie un message au compte manager connecté. Une erreur Resend affichée doit être corrigée (clé invalide, adresse expéditeur invalide, domaine non vérifié ou restrictions du compte).
+- Après modification de variables dans Vercel, déclenchez un nouveau déploiement de Production pour que les fonctions API chargent les nouvelles valeurs.
+- Toute clé de compte de service affichée ou partagée dans un chat doit être révoquée et remplacée par une nouvelle clé privée.

@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "vitest run tests/financial.test.ts",
+    "test": "vitest run tests/financial.test.ts tests/admin-config.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty",
     "set:role": "tsx scripts/set-role.ts",

@@ -227,6 +227,18 @@ export default function Workspace() {
   }, [role]);
 
   useEffect(() => {
+    const onEmailError = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      setNotice({
+        type: 'error',
+        message: 'L’action a été enregistrée, mais l’e-mail n’a pas pu être envoyé : ' + String(detail || 'Erreur Resend inconnue.'),
+      });
+    };
+    window.addEventListener('music-house-email-error', onEmailError);
+    return () => window.removeEventListener('music-house-email-error', onEmailError);
+  }, []);
+
+  useEffect(() => {
     if (role === 'manager') {
       setManagerUsers(data.users.rows.map((row) => ({
         uid: row.id, displayName: String(row.displayName || row.email || 'Utilisateur'),
@@ -350,6 +362,14 @@ export default function Workspace() {
       if (!checkoutUrl) throw new Error('Fapshi n’a pas retourné de lien de paiement sécurisé.');
       window.location.assign(checkoutUrl);
     }, 'Redirection sécurisée vers Fapshi…');
+  }
+
+  async function testEmailConfiguration() {
+    await action(async () => {
+      if (!navigator.onLine) throw new Error('Le test e-mail nécessite une connexion Internet.');
+      const result = await callStudioApi('testEmail');
+      if (!result || result.sent !== true) throw new Error('Resend n’a pas confirmé l’envoi du message de test.');
+    }, 'Resend a accepté le message de test. Vérifiez la boîte du compte manager et le dossier Spam.');
   }
 
   async function saveBookingPolicy(event: FormEvent<HTMLFormElement>) {
@@ -626,7 +646,7 @@ export default function Workspace() {
         {section === 'commissions' && <CommissionsPage role={role} rows={filtered(data.commissions.rows)} onPaid={markCommissionPaid} />}
         {section === 'distribution' && role !== 'producer' && <DistributionPage role={role} rows={filtered(data.distribution.rows)} onAdd={() => setModal('distribution')} onStatus={(row, status) => action(async () => { await updateDoc(doc(db!, 'distributionOrders', row.id), { status, updatedAt: serverTimestamp(), updatedBy: uid }); if (role === 'manager') await notifyStudioEmail('distributionStatus', { orderId: row.id, status }); }, 'Le statut de distribution a été mis à jour.')} />}
         {section === 'reports' && role === 'manager' && <ReportsPage data={data} />}
-        {section === 'settings' && (role === 'manager' || role === 'producer') && <SettingsPage rates={role === 'manager' ? rates : null} canManageRates={role === 'manager'} bookingPolicy={bookingPolicy} onSaveBookingPolicy={saveBookingPolicy} onInitialize={() => action(async () => { await initializeBusinessSettings(db!, uid); setRates(await getRateSet(db!)); }, 'Les paramètres financiers par défaut ont été initialisés.')} onSave={saveRates} onClearCache={() => action(() => clearLocalFirestoreCache(), 'Le cache local a été effacé.')} />}
+        {section === 'settings' && (role === 'manager' || role === 'producer') && <SettingsPage rates={role === 'manager' ? rates : null} canManageRates={role === 'manager'} bookingPolicy={bookingPolicy} onSaveBookingPolicy={saveBookingPolicy} onInitialize={() => action(async () => { await initializeBusinessSettings(db!, uid); setRates(await getRateSet(db!)); }, 'Les paramètres financiers par défaut ont été initialisés.')} onSave={saveRates} onTestEmail={testEmailConfiguration} onClearCache={() => action(() => clearLocalFirestoreCache(), 'Le cache local a été effacé.')} />}
         {section === 'notifications' && <NotificationsPage rows={filtered(data.notifications.rows)} onRead={readNotification} />}
         {section === 'profile' && role === 'client' && <ProfilePage profile={myProfile} uid={uid} onSaved={() => setNotice({ type: 'success', message: 'Votre profil artistique a été mis à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
         {section === 'profile' && role !== 'client' && <AccountProfilePage uid={uid} displayName={profile?.displayName || ''} email={profile?.email || ''} photoURL={profile?.photoURL || ''} onSaved={() => setNotice({ type: 'success', message: 'Votre photo de profil a été mise à jour.' })} onError={(message) => setNotice({ type: 'error', message })} />}
@@ -856,10 +876,10 @@ function ReportsPage({ data }: { data: ReturnType<typeof useWorkspaceData> }) {
   </>;
 }
 
-function SettingsPage({ rates, canManageRates, bookingPolicy, onSaveBookingPolicy, onInitialize, onSave, onClearCache }: {
+function SettingsPage({ rates, canManageRates, bookingPolicy, onSaveBookingPolicy, onInitialize, onSave, onTestEmail, onClearCache }: {
   rates: RateSet | null; canManageRates: boolean; bookingPolicy: BookingPolicy;
   onSaveBookingPolicy: (event: FormEvent<HTMLFormElement>) => void;
-  onInitialize: () => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onClearCache: () => void;
+  onInitialize: () => void; onSave: (event: FormEvent<HTMLHTMLFormElement>) => void; onTestEmail: () => void; onClearCache: () => void;
 }) {
   return <><PageHeader eyebrow="CONFIGURATION DU STUDIO" title="Paramètres" subtitle="Conditions de réservation, offres commerciales et règles financières du studio." />
     <form key={`${bookingPolicy.defaultDepositPercent}-${bookingPolicy.defaultDiscountPercent}-${bookingPolicy.allowFullPaymentDefault}-${bookingPolicy.whatsappNumber}`} className="settings-card" onSubmit={onSaveBookingPolicy}>
@@ -872,6 +892,7 @@ function SettingsPage({ rates, canManageRates, bookingPolicy, onSaveBookingPolic
       </div>
       <p className="form-hint">Le montant final remisé et le montant d’acompte sont enregistrés dans chaque réservation. Une modification ultérieure ne change pas les conditions d’une réservation déjà envoyée.</p>
     </form>
+    {canManageRates && <section className="settings-card"><div className="settings-card-header"><div><h3>Vérification des e-mails</h3><p>Envoyez un message de test à l’adresse du compte manager. En cas de refus, le message détaillera l’erreur renvoyée par Resend.</p></div><Button onClick={onTestEmail} variant="primary"><Mail size={16} /> Envoyer un e-mail de test</Button></div><p className="form-hint">Le résultat confirme l’acceptation du message par Resend ; vérifiez aussi la boîte de réception et le dossier Spam.</p></section>}
     {canManageRates && (!rates ? <section className="settings-card"><div className="settings-card-header"><div><h3>Répartitions financières</h3><p>Initialisez les taux convenus dans le cahier des charges V1.</p></div><Button variant="primary" onClick={onInitialize}><CheckCircle2 size={16} /> Initialiser les taux V1</Button></div><div className="rate-defaults"><div><b>Studio</b><span>Manager 25 % · Producteur 50 % · Réserve 25 %</span></div><div><b>Distribution</b><span>Manager 70 % · Producteur 20 % · Réserve 10 %</span></div></div></section> : <form className="settings-card" onSubmit={onSave}><div className="settings-card-header"><div><h3>Répartitions des recettes</h3><p>Version actuellement chargée : <b>{rates.version}</b>. Les nouveaux taux ne modifient pas les paiements antérieurs.</p></div><Button type="submit" variant="primary"><Check size={16} /> Enregistrer les taux</Button></div><div className="rate-groups"><RateGroup title="Prestations ordinaires du studio" prefix="studio" value={rates.studio} /><RateGroup title="Distribution numérique" prefix="dist" value={rates.distribution} /></div><div className="threshold-field"><label>Seuil d’autorisation des dépenses exceptionnelles (FCFA)<input className="field" name="expenseThreshold" type="number" min="0" step="1" defaultValue={rates.expenseApprovalThresholdXaf ?? ''} /></label><p className="small-note">Laissez vide pour imposer deux validations distinctes des dépenses signalées comme exceptionnelles. Au-dessus du seuil défini, une validation du manager et une du producteur sont requises.</p></div><div className="form-hint">La somme doit être exactement égale à 100 % pour chaque catégorie. Les calculs sont en montants XAF entiers et le reliquat est affecté à la réserve.</div></form>)}
     {!canManageRates && <p className="small-note">Les répartitions des recettes restent modifiables uniquement par le manager principal.</p>}
     <section className="settings-card"><div className="settings-card-header"><div><h3>Cache hors connexion</h3><p>La persistance IndexedDB doit être réservée à un appareil personnel. Les appareils non approuvés utilisent le cache mémoire.</p></div><StatusPill value={typeof localStorage !== 'undefined' && localStorage.getItem('mhb_trusted_device') === 'yes' ? 'active' : 'pending'} /></div><div className="settings-actions"><Button onClick={onClearCache} variant="danger">Effacer le cache local et recharger</Button><span className="small-note">Sur un appareil partagé, déconnectez-vous et effacez les données locales du navigateur.</span></div></section>

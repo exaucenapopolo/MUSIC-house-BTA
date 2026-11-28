@@ -42,7 +42,7 @@ function emailHtml(title, intro, details, actionUrl, actionLabel, extraHtml) {
 }
 
 function getFromAddress() {
-  const value = String(process.env.RESEND_FROM_EMAIL || '').trim();
+  const value = String(process.env.RESEND_FROM_EMAIL || '').trim().replace(/,\s*$/, '');
   if (!value || /[\r\n]/.test(value)) throw new Error('RESEND_FROM_EMAIL est absente ou invalide.');
   const emailPattern = /^[A-Z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/i;
   if (emailPattern.test(value)) return 'MUSIC HOUSE BTA <' + value + '>';
@@ -52,20 +52,49 @@ function getFromAddress() {
 }
 
 async function sendEmail(to, subject, html, idempotencyKey) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) throw new Error('RESEND_API_KEY est absente de la configuration serveur.');
-  if (!to || !String(to).includes('@')) return { skipped: true };
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  if (!apiKey) throw new Error('RESEND_API_KEY est absente de la configuration serveur Vercel.');
+  if (!to || !String(to).includes('@')) throw new Error('Adresse e-mail destinataire invalide.');
+  const from = getFromAddress();
   const headers = { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' };
   if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey).slice(0, 256);
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: headers,
-    body: JSON.stringify({ from: getFromAddress(), to: [String(to)], subject: subject, html: html }),
-    signal: AbortSignal.timeout(12000),
-    cache: 'no-store',
-  });
+
+  let response;
+  try {
+    response = await fetch('https://api.resend.com/emails', {
+      method: 'POST', headers,
+      body: JSON.stringify({ from, to: [String(to).trim()], subject, html }),
+      signal: AbortSignal.timeout(12000), cache: 'no-store',
+    });
+  } catch (error) {
+    throw new Error('Impossible de joindre Resend : ' + String(error && error.message || error).slice(0, 220));
+  }
   const payload = await response.json().catch(function () { return {}; });
-  if (!response.ok) throw new Error(String(payload.message || payload.error || 'Resend a répondu avec le statut ' + response.status).slice(0, 300));
+  if (!response.ok) {
+    const providerMessage = String(payload.message || payload.error || 'Resend a répondu avec le statut ' + response.status).slice(0, 300);
+    const fromMatch = from.match(/<([^<>]+)>/);
+    const sender = fromMatch ? fromMatch[1] : from;
+    const senderDomain = String(sender.split('@')[1] || '').toLowerCase();
+    let domainHint = '';
+    try {
+      const domainsResponse = await fetch('https://api.resend.com/domains', {
+        method: 'GET', headers: { Authorization: 'Bearer ' + apiKey },
+        cache: 'no-store', signal: AbortSignal.timeout(7000),
+      });
+      const domainsPayload = await domainsResponse.json().catch(function () { return {}; });
+      if (domainsResponse.ok && Array.isArray(domainsPayload.data)) {
+        const matching = domainsPayload.data.find(function (item) {
+          return String(item && item.name || '').toLowerCase() === senderDomain;
+        });
+        if (!matching) domainHint = ' Le domaine expéditeur "' + senderDomain + '" n’est pas enregistré dans ce compte Resend.';
+        else if (String(matching.status || '').toLowerCase() !== 'verified') {
+          domainHint = ' Le domaine expéditeur "' + senderDomain + '" n’est pas vérifié dans Resend (statut : ' + String(matching.status || 'inconnu') + ').';
+        }
+      }
+    } catch { /* Keep the original provider error when diagnostics are unavailable. */ }
+    console.error('[MUSIC HOUSE RESEND]', JSON.stringify({ status: response.status, senderDomain, error: providerMessage, domainHint: domainHint || undefined }));
+    throw new Error(providerMessage + domainHint);
+  }
   return { id: payload.id || null };
 }
 
@@ -178,6 +207,18 @@ async function handleRequest(req, context, body) {
         [['Nom', displayName], ['Rôle', 'Producteur']], resetLink, 'Définir mon mot de passe'),
       'studio-producer-invite-' + user.uid);
     return { uid: user.uid, email: email, role: 'producer' };
+  }
+
+  if (action === 'testEmail') {
+    requireRole(context, 'manager');
+    if (!context.email || !context.email.includes('@')) throw new Error('Aucune adresse e-mail n’est associée au compte manager.');
+    const result = await sendEmail(context.email, 'Test de configuration e-mail · MUSIC HOUSE BTA',
+      emailHtml('Votre configuration e-mail fonctionne', 'Resend a accepté cet e-mail de test envoyé depuis votre espace manager. Vérifiez aussi votre dossier Spam ou Courrier indésirable.', [
+        ['Compte de destination', context.email],
+        ['Projet Firebase', process.env.FIREBASE_PROJECT_ID || 'music-house-bta'],
+      ], APP_URL, 'Ouvrir MUSIC HOUSE BTA'),
+      'studio-manager-email-test-' + context.uid + '-' + Date.now());
+    return { sent: true, recipient: context.email, providerId: result.id };
   }
 
   if (action === 'welcome') {
