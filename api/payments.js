@@ -31,7 +31,7 @@ function fapshiUserId(uid) {
 function safeCheckoutUrl(value) {
   try {
     const url = new URL(String(value || ''));
-    return url.protocol === 'https:' && (url.hostname === 'fapshi.com' || url.hostname.endsWith('.fapshi.com'))
+    return url.protocol === 'https:' && !url.username && !url.password
       ? url.toString() : '';
   } catch {
     return '';
