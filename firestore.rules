@@ -24,23 +24,35 @@ service cloud.firestore {
     }
     function validServiceSnapshot() {
       let servicePath = /databases/$(database)/documents/services/$(request.resource.data.serviceId);
-      let service = get(servicePath).data;
-      let original = service.priceXaf;
-      let discount = service.get('discountPercent', 0);
+      let svc = get(servicePath).data;
+      let original = svc.priceXaf;
+      let discount = svc.get('discountPercent', 0);
       let expectedPrice = original * (100 - discount) / 100;
-      let depositPercent = service.get('depositPercent', 50);
+      let depositPercent = svc.get('depositPercent', 50);
       let expectedDeposit = request.resource.data.servicePriceXaf * depositPercent / 100;
       return exists(servicePath)
-        && service.isActive == true
-        && request.resource.data.serviceName == service.name
+        && svc.isActive == true
+        && request.resource.data.serviceName == svc.name
         && request.resource.data.serviceOriginalPriceXaf == original
         && request.resource.data.discountPercent == discount
         && request.resource.data.servicePriceXaf >= expectedPrice - 0.5
         && request.resource.data.servicePriceXaf <= expectedPrice + 0.5
         && request.resource.data.depositExpectedXaf >= expectedDeposit
         && request.resource.data.depositExpectedXaf < expectedDeposit + 1
-        && request.resource.data.splitType == service.splitType
-        && request.resource.data.allowFullPayment == service.get('allowFullPayment', true);
+        && request.resource.data.splitType == svc.splitType
+        && request.resource.data.allowFullPayment == svc.get('allowFullPayment', true);
+    }
+
+
+    function appointmentOwnedByCaller(appointmentId) {
+      let appointmentPath = /databases/$(database)/documents/appointments/$(appointmentId);
+      return signedIn() && exists(appointmentPath)
+        && get(appointmentPath).data.ownerUid == request.auth.uid;
+    }
+    function projectProducerIsCaller(projectId) {
+      let projectPath = /databases/$(database)/documents/projects/$(projectId);
+      return isProducer() && exists(projectPath)
+        && get(projectPath).data.producerUid == request.auth.uid;
     }
 
     match /users/{uid} {
@@ -125,11 +137,6 @@ service cloud.firestore {
     }
 
     match /appointmentLocks/{lockId} {
-      function appointmentOwnedByCaller(appointmentId) {
-        let appointmentPath = /databases/$(database)/documents/appointments/$(appointmentId);
-        return signedIn() && exists(appointmentPath)
-          && get(appointmentPath).data.ownerUid == request.auth.uid;
-      }
       allow read: if isStaff() || appointmentOwnedByCaller(resource.data.appointmentId);
       allow create, update: if isStaff();
       allow delete: if isStaff() || appointmentOwnedByCaller(resource.data.appointmentId);
@@ -147,14 +154,10 @@ service cloud.firestore {
       allow delete: if isManager();
 
       match /internalNotes/{noteId} {
-        function parentProject() {
-          return get(/databases/$(database)/documents/projects/$(projectId)).data;
-        }
-        allow read: if isManager()
-          || (isProducer() && parentProject().producerUid == request.auth.uid);
+        allow read: if isManager() || projectProducerIsCaller(projectId);
         allow create: if isStaff()
           && request.resource.data.authorUid == request.auth.uid
-          && (isManager() || parentProject().producerUid == request.auth.uid);
+          && (isManager() || projectProducerIsCaller(projectId));
         allow update, delete: if isManager();
       }
     }
