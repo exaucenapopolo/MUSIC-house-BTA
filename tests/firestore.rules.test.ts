@@ -5,7 +5,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import {
-  collection, doc, getDoc, getDocs, setDoc, updateDoc, writeBatch, Timestamp,
+  collection, doc, getDoc, getDocs, query, where, setDoc, updateDoc, writeBatch, Timestamp,
 } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
@@ -84,7 +84,7 @@ describe('règles Firestore — séparation des rôles et protection des paiemen
     await seed([{ path: 'services/mixage', value: service() }]);
     const client = testEnv.authenticatedContext('client-a', { role: 'client' }).firestore();
     await assertSucceeds(getDoc(doc(client, 'services/mixage')));
-    await assertSucceeds(getDocs(collection(client, 'services')));
+    await assertSucceeds(getDocs(query(collection(client, 'services'), where('isActive', '==', true))));
     await assertFails(updateDoc(doc(client, 'services/mixage'), { priceXaf: 1 }));
     await assertFails(setDoc(doc(client, 'services/hacker'), { ...service(), priceXaf: 1 }));
   });
@@ -97,6 +97,11 @@ describe('règles Firestore — séparation des rôles et protection des paiemen
     await assertSucceeds(updateDoc(doc(client, 'appointments/booking-a'), { status: 'cancelled', updatedAt: now }));
     await assertFails(updateDoc(doc(client, 'appointments/booking-a'), { servicePriceXaf: 1 }));
     await assertFails(setDoc(doc(client, 'appointments/booking-underpriced'), appointment('client-a', 'client-a', { servicePriceXaf: 1 })));
+    await assertSucceeds(updateDoc(doc(client, 'appointments/booking-a'), {
+      startsAt: Timestamp.fromDate(new Date('2026-11-29T10:00:00+01:00')),
+      endsAt: Timestamp.fromDate(new Date('2026-11-29T12:00:00+01:00')),
+      status: 'requested', rescheduledFrom: now, rescheduledAt: now, updatedAt: now,
+    }));
   });
 
   it('empêche un client de consulter ou modifier le rendez-vous d’un autre artiste', async () => {

@@ -114,9 +114,13 @@ service cloud.firestore {
           && changedOnly(['resourceId', 'startsAt', 'endsAt', 'status', 'internalNote', 'updatedAt',
             'confirmedAt', 'rescheduledFrom', 'rescheduledAt', 'amountPaidXaf']))
         || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid
-          && changedOnly(['clientNote', 'status', 'updatedAt'])
+          && changedOnly(['clientNote', 'status', 'updatedAt', 'startsAt', 'endsAt', 'rescheduledFrom', 'rescheduledAt'])
+          && request.resource.data.get('producerUid', '') == resource.data.get('producerUid', '')
+          && request.resource.data.get('resourceId', 'studio') == resource.data.get('resourceId', 'studio')
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
-            || request.resource.data.status == 'cancelled'));
+            || request.resource.data.status in ['cancelled', 'requested'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['startsAt', 'endsAt', 'rescheduledFrom', 'rescheduledAt'])
+            || request.resource.data.status == 'requested'));
       allow delete: if isManager();
     }
 
