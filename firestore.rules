@@ -28,8 +28,6 @@ service cloud.firestore {
       let original = svc.priceXaf;
       let discount = svc.get('discountPercent', 0);
       let expectedPrice = original * (100 - discount) / 100;
-      let depositPercent = svc.get('depositPercent', 50);
-      let expectedDeposit = request.resource.data.servicePriceXaf * depositPercent / 100;
       return exists(servicePath)
         && svc.isActive == true
         && request.resource.data.serviceName == svc.name
@@ -37,8 +35,8 @@ service cloud.firestore {
         && request.resource.data.discountPercent == discount
         && request.resource.data.servicePriceXaf >= expectedPrice - 0.5
         && request.resource.data.servicePriceXaf <= expectedPrice + 0.5
-        && request.resource.data.depositExpectedXaf >= expectedDeposit
-        && request.resource.data.depositExpectedXaf < expectedDeposit + 1
+        && request.resource.data.depositExpectedXaf == 0
+        && request.resource.data.status == 'requested'
         && request.resource.data.splitType == svc.splitType
         && request.resource.data.allowFullPayment == svc.get('allowFullPayment', true);
     }
@@ -107,16 +105,16 @@ service cloud.firestore {
           && validServiceSnapshot()
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.amountPaidXaf == 0
-          && ((request.resource.data.depositExpectedXaf > 0 && request.resource.data.status == 'awaiting_deposit')
-            || (request.resource.data.depositExpectedXaf == 0 && request.resource.data.status == 'requested'))
+          && request.resource.data.depositExpectedXaf == 0
+          && request.resource.data.status == 'requested'
         || (signedIn() && role() == 'client'
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.artistId == request.auth.uid
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.amountPaidXaf == 0
           && validServiceSnapshot()
-          && ((request.resource.data.depositExpectedXaf > 0 && request.resource.data.status == 'awaiting_deposit')
-            || (request.resource.data.depositExpectedXaf == 0 && request.resource.data.status == 'requested')));
+          && request.resource.data.depositExpectedXaf == 0
+          && request.resource.data.status == 'requested');
       allow update: if isManager()
           && changedOnly(['producerUid', 'producerName', 'resourceId', 'startsAt', 'endsAt', 'status',
             'internalNote', 'updatedAt', 'confirmedAt', 'depositWaived', 'depositWaivedBy',
@@ -258,6 +256,11 @@ service cloud.firestore {
       allow create: if isStaff()
         && request.resource.data.actorUid == request.auth.uid;
       allow update, delete: if isManager();
+    }
+
+    match /studios/{studioId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isManager();
     }
 
     match /settings/{settingId} {

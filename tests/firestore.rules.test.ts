@@ -44,9 +44,9 @@ function appointment(ownerUid: string, createdBy: string, overrides: Record<stri
     serviceId: 'mixage', serviceName: 'Mixage studio',
     servicePriceXaf: 18000, serviceOriginalPriceXaf: 20000,
     discountPercent: 10, allowFullPayment: true,
-    splitType: 'studio', depositExpectedXaf: 9000, amountPaidXaf: 0,
+    splitType: 'studio', depositExpectedXaf: 0, depositPercent: 0, requestedDepositPercent: 50, amountPaidXaf: 0,
     resourceId: 'studio', startsAt: now, endsAt: Timestamp.fromDate(new Date('2026-11-28T12:00:00+01:00')),
-    status: 'awaiting_deposit', createdBy, createdAt: now, updatedAt: now,
+    status: 'requested', createdBy, createdAt: now, updatedAt: now,
     ...overrides,
   };
 }
@@ -97,6 +97,7 @@ describe('règles Firestore — séparation des rôles et protection des paiemen
     await assertSucceeds(updateDoc(doc(client, 'appointments/booking-a'), { status: 'cancelled', updatedAt: now }));
     await assertFails(updateDoc(doc(client, 'appointments/booking-a'), { servicePriceXaf: 1 }));
     await assertFails(setDoc(doc(client, 'appointments/booking-underpriced'), appointment('client-a', 'client-a', { servicePriceXaf: 1 })));
+    await assertFails(updateDoc(doc(client, 'appointments/booking-a'), { depositExpectedXaf: 1, depositPercent: 100 }));
     await assertSucceeds(updateDoc(doc(client, 'appointments/booking-a'), {
       startsAt: Timestamp.fromDate(new Date('2026-11-29T10:00:00+01:00')),
       endsAt: Timestamp.fromDate(new Date('2026-11-29T12:00:00+01:00')),
@@ -164,6 +165,20 @@ describe('règles Firestore — séparation des rôles et protection des paiemen
     await assertFails(setDoc(doc(producer, 'settings/commissionRates'), {
       version: 'v2', studio: { manager: 0, producer: 0, reserve: 100 },
     }));
+  });
+
+
+  it('publie le profil studio aux comptes connectés, mais réserve sa modification au manager', async () => {
+    await seed([{ path: 'studios/music-house-bta', value: {
+      id: 'music-house-bta', name: 'Young Forever Records', slogan: 'Donnez vie à votre son.',
+    } }]);
+    const client = testEnv.authenticatedContext('client-a', { role: 'client' }).firestore();
+    const producer = testEnv.authenticatedContext('producer-a', { role: 'producer' }).firestore();
+    const manager = testEnv.authenticatedContext('manager-a', { role: 'manager' }).firestore();
+    await assertSucceeds(getDoc(doc(client, 'studios/music-house-bta')));
+    await assertFails(updateDoc(doc(client, 'studios/music-house-bta'), { name: 'Studio modifié' }));
+    await assertFails(updateDoc(doc(producer, 'studios/music-house-bta'), { description: 'Non autorisé' }));
+    await assertSucceeds(updateDoc(doc(manager, 'studios/music-house-bta'), { description: 'Studio et production musicale' }));
   });
 
   it('permet aux utilisateurs de lire leurs notifications et seulement de les marquer comme lues', async () => {
