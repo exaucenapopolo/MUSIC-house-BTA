@@ -153,6 +153,218 @@ async function sendManagerEmail(subject, intro, details, key) {
     emailHtml(subject, intro, details, APP_URL, 'Ouvrir le tableau de bord'), key);
 }
 
+
+function appointmentSlotIds(resourceId, start, end) {
+  const startMs = start.getTime();
+  const endMs = end.getTime();
+  const slotMs = 15 * 60 * 1000;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs
+      || startMs % slotMs !== 0 || endMs % slotMs !== 0) {
+    throw new Error('Le créneau de rendez-vous est invalide. Choisissez un horaire aligné sur 15 minutes.');
+  }
+  const ids = [];
+  for (let cursor = startMs; cursor < endMs; cursor += slotMs) {
+    ids.push('slot_' + encodeURIComponent(resourceId || 'studio') + '_' + Math.floor(cursor / slotMs));
+  }
+  return ids;
+}
+
+function whatsappLink(number, message) {
+  const phone = String(number || '').replace(/\D/g, '');
+  return phone ? 'https://wa.me/' + phone + '?text=' + encodeURIComponent(message) : '';
+}
+
+async function createUserNotification(db, services, recipientUid, title, message, kind) {
+  if (!recipientUid || recipientUid === 'manual') return;
+  await db.collection('notifications').add({
+    recipientUid, title, message, kind, createdBy: 'system',
+    createdAt: services.FieldValue.serverTimestamp(), readAt: null,
+  });
+}
+
+async function acceptAppointment(context, body) {
+  requireRole(context, 'manager');
+  const { db, FieldValue } = context.services;
+  const appointmentId = String(body.appointmentId || '').trim();
+  if (!appointmentId || appointmentId.includes('/')) throw new Error('Identifiant de rendez-vous invalide.');
+  const depositPercent = Number(body.depositPercent);
+  if (!Number.isInteger(depositPercent) || depositPercent < 1 || depositPercent > 100) {
+    throw new Error('Le pourcentage d’acompte doit être compris entre 1 et 100 %.');
+  }
+  const appointmentRef = db.collection('appointments').doc(appointmentId);
+  const snapshot = await appointmentRef.get();
+  if (!snapshot.exists) throw new Error('Rendez-vous introuvable.');
+  const appointment = snapshot.data() || {};
+  if (!['requested', 'rescheduled'].includes(String(appointment.status))) {
+    throw new Error('Cette demande a déjà été traitée ou ne peut plus être acceptée.');
+  }
+  const total = Number(appointment.servicePriceXaf);
+  if (!Number.isSafeInteger(total) || total <= 0) throw new Error('Le prix final de la prestation est invalide.');
+  const depositAmount = Math.min(total, Math.max(1, Math.ceil(total * depositPercent / 100)));
+  const start = appointment.startsAt && typeof appointment.startsAt.toDate === 'function' ? appointment.startsAt.toDate() : new Date(appointment.startsAt);
+  const end = appointment.endsAt && typeof appointment.endsAt.toDate === 'function' ? appointment.endsAt.toDate() : new Date(appointment.endsAt);
+  if (!Number.isFinite(start.getTime()) || start.getTime() <= Date.now()) {
+    throw new Error('Le créneau proposé est déjà passé. Demandez à l’artiste de choisir une nouvelle date.');
+  }
+  const resourceId = String(appointment.resourceId || 'studio');
+  const lockIds = appointmentSlotIds(resourceId, start, end);
+  const lockRefs = lockIds.map((id) => db.collection('appointmentLocks').doc(id));
+  const producerUid = String(body.producerUid || appointment.producerUid || '').trim();
+  let producer = null;
+  if (producerUid) {
+    const producerSnap = await db.collection('users').doc(producerUid).get();
+    if (!producerSnap.exists || producerSnap.data().role !== 'producer' || producerSnap.data().active !== true) {
+      throw new Error('Le producteur sélectionné est introuvable ou inactif.');
+    }
+    producer = { uid: producerUid, name: String(producerSnap.data().displayName || producerSnap.data().email || 'Producteur') };
+  }
+
+  const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  const clientNoticeRef = db.collection('notifications').doc();
+  await db.runTransaction(async (transaction) => {
+    const fresh = await transaction.get(appointmentRef);
+    if (!fresh.exists) throw new Error('Rendez-vous introuvable.');
+    const current = fresh.data() || {};
+    if (!['requested', 'rescheduled'].includes(String(current.status))) {
+      throw new Error('Cette demande vient d’être traitée par une autre session. Actualisez la page.');
+    }
+    const locks = await Promise.all(lockRefs.map((ref) => transaction.get(ref)));
+    const now = Date.now();
+    const conflict = locks.find((lock) => {
+      if (!lock.exists || lock.data().appointmentId === appointmentId) return false;
+      const data = lock.data() || {};
+      const expiry = data.expiresAt && typeof data.expiresAt.toDate === 'function'
+        ? data.expiresAt.toDate().getTime() : data.expiresAt ? new Date(data.expiresAt).getTime() : 0;
+      return data.status === 'confirmed' || (data.status === 'pending_payment' && expiry > now);
+    });
+    if (conflict) throw new Error('Ce créneau n’est plus disponible. Proposez une autre date à l’artiste.');
+
+    transaction.update(appointmentRef, {
+      status: 'awaiting_deposit',
+      depositPercent,
+      depositExpectedXaf: depositAmount,
+      acceptedAt: FieldValue.serverTimestamp(),
+      acceptedBy: context.uid,
+      depositDeadlineAt: expiresAt,
+      ...(producer ? { producerUid: producer.uid, producerName: producer.name } : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    lockRefs.forEach((ref) => transaction.set(ref, {
+      appointmentId, resourceId, startsAt: current.startsAt, endsAt: current.endsAt,
+      status: 'pending_payment', expiresAt,
+      createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true }));
+    if (current.ownerUid && current.ownerUid !== 'manual') transaction.set(clientNoticeRef, {
+      recipientUid: current.ownerUid,
+      title: 'Votre demande a été acceptée',
+      message: 'Le studio a accepté votre demande pour « ' + String(current.serviceName || 'votre prestation') + ' ». Réglez l’acompte pour confirmer votre présence.',
+      kind: 'appointment_accepted',
+      createdBy: context.uid,
+      createdAt: FieldValue.serverTimestamp(),
+      readAt: null,
+    });
+  });
+
+  const contact = await getArtistContact(context, appointment.artistId, appointment.ownerUid);
+  const studioSnap = await db.collection('studios').doc('music-house-bta').get();
+  const policySnap = await db.collection('settings').doc('bookingPolicy').get();
+  const whatsappNumber = String(studioSnap.exists && studioSnap.data().whatsappNumber
+    || policySnap.exists && policySnap.data().whatsappNumber || '');
+  const message = 'Bonjour MUSIC HOUSE BTA, ma demande pour « ' + String(appointment.serviceName || 'la prestation') +
+    ' » a été acceptée. Je souhaite confirmer ma présence et j’ai une question concernant l’acompte.';
+  const wa = whatsappLink(whatsappNumber, message);
+  const extra = wa
+    ? '<p style="margin:18px 0 0;color:#59645d;font-size:13px;line-height:1.7">Une question ? <a href="' + escapeHtml(wa) + '" style="color:#a86a39;font-weight:700">Contacter le studio sur WhatsApp</a>.</p>'
+    : '';
+  const details = [
+    ['Prestation', appointment.serviceName],
+    ['Date et heure', dateLabel(appointment.startsAt)],
+    ['Prix total', total.toLocaleString('fr-FR') + ' FCFA'],
+    ['Acompte demandé', depositPercent + ' % · ' + depositAmount.toLocaleString('fr-FR') + ' FCFA'],
+    ['Paiement avant', dateLabel(expiresAt)],
+    ...(producer ? [['Producteur', producer.name]] : []),
+  ];
+  try {
+    if (!contact.email || !contact.email.includes('@')) throw new Error('Aucune adresse e-mail exploitable pour cet artiste.');
+    await sendEmail(contact.email, 'Votre demande est acceptée : confirmez votre présence',
+      emailHtml('Le studio est prêt à vous accueillir', 'Bonne nouvelle : MUSIC HOUSE BTA a accepté votre demande. Votre créneau sera définitivement confirmé dès que le paiement de l’acompte aura été vérifié.', details,
+        APP_URL + '/appointments', 'Payer mon acompte et confirmer ma présence', extra),
+      'studio-appointment-accepted-' + appointmentId);
+    return { accepted: true, emailSent: true, depositPercent, depositAmountXaf: depositAmount };
+  } catch (error) {
+    console.error('[MUSIC HOUSE APPOINTMENT ACCEPT EMAIL]', error && error.message || error);
+    return { accepted: true, emailSent: false, emailError: String(error && error.message || error).slice(0, 320), depositPercent, depositAmountXaf: depositAmount };
+  }
+}
+
+async function rejectAppointment(context, body) {
+  requireRole(context, 'manager');
+  const { db, FieldValue } = context.services;
+  const appointmentId = String(body.appointmentId || '').trim();
+  if (!appointmentId || appointmentId.includes('/')) throw new Error('Identifiant de rendez-vous invalide.');
+  const appointmentRef = db.collection('appointments').doc(appointmentId);
+  const snapshot = await appointmentRef.get();
+  if (!snapshot.exists) throw new Error('Rendez-vous introuvable.');
+  const appointment = snapshot.data() || {};
+  if (!['requested', 'rescheduled', 'awaiting_deposit'].includes(String(appointment.status))) {
+    throw new Error('Cette demande ne peut plus être refusée dans son état actuel.');
+  }
+  if ((Number(appointment.amountPaidXaf) || 0) > 0) throw new Error('Un acompte a déjà été encaissé. Effectuez une régularisation avant tout refus.');
+  if (appointment.status === 'awaiting_deposit') {
+    const attempts = await db.collection('paymentAttempts').where('appointmentId', '==', appointmentId).limit(20).get();
+    if (attempts.docs.some((item) => ['INITIATING', 'PENDING'].includes(String(item.data().status)))) {
+      throw new Error('Un paiement est déjà en cours. Vérifiez son statut Fapshi avant de traiter cette demande.');
+    }
+  }
+  const start = appointment.startsAt && typeof appointment.startsAt.toDate === 'function' ? appointment.startsAt.toDate() : new Date(appointment.startsAt);
+  const end = appointment.endsAt && typeof appointment.endsAt.toDate === 'function' ? appointment.endsAt.toDate() : new Date(appointment.endsAt);
+  const lockIds = appointmentSlotIds(String(appointment.resourceId || 'studio'), start, end);
+  const lockRefs = lockIds.map((id) => db.collection('appointmentLocks').doc(id));
+  const reason = String(body.reason || '').trim().slice(0, 500);
+  const noticeRef = db.collection('notifications').doc();
+
+  await db.runTransaction(async (transaction) => {
+    const fresh = await transaction.get(appointmentRef);
+    if (!fresh.exists || !['requested', 'rescheduled', 'awaiting_deposit'].includes(String(fresh.data().status))) {
+      throw new Error('Cette demande a déjà été traitée. Actualisez la page.');
+    }
+    const locks = await Promise.all(lockRefs.map((ref) => transaction.get(ref)));
+    transaction.update(appointmentRef, {
+      status: 'rejected', rejectionReason: reason || null, rejectedAt: FieldValue.serverTimestamp(),
+      rejectedBy: context.uid, updatedAt: FieldValue.serverTimestamp(),
+    });
+    locks.forEach((lock, index) => {
+      if (lock.exists && lock.data().appointmentId === appointmentId && lock.data().status !== 'confirmed') {
+        transaction.delete(lockRefs[index]);
+      }
+    });
+    if (fresh.data().ownerUid && fresh.data().ownerUid !== 'manual') transaction.set(noticeRef, {
+      recipientUid: fresh.data().ownerUid, title: 'Mise à jour de votre demande',
+      message: reason ? 'Le studio ne peut pas accepter votre demande : ' + reason : 'Le studio ne peut pas accepter votre demande à la date proposée.',
+      kind: 'appointment_rejected', createdBy: context.uid,
+      createdAt: FieldValue.serverTimestamp(), readAt: null,
+    });
+  });
+
+  const contact = await getArtistContact(context, appointment.artistId, appointment.ownerUid);
+  const studioSnap = await db.collection('studios').doc('music-house-bta').get();
+  const policySnap = await db.collection('settings').doc('bookingPolicy').get();
+  const whatsappNumber = String(studioSnap.exists && studioSnap.data().whatsappNumber || policySnap.exists && policySnap.data().whatsappNumber || '');
+  const wa = whatsappLink(whatsappNumber, 'Bonjour MUSIC HOUSE BTA, j’ai reçu votre réponse concernant ma demande pour « ' + String(appointment.serviceName || 'une prestation') + ' ». J’aimerais échanger avec vous.');
+  const details = [['Prestation', appointment.serviceName], ['Date demandée', dateLabel(appointment.startsAt)], ...(reason ? [['Motif', reason]] : [])];
+  const extra = wa ? '<p style="margin-top:18px"><a href="' + escapeHtml(wa) + '" style="color:#a86a39;font-weight:700">Discuter avec le studio sur WhatsApp</a></p>' : '';
+  try {
+    if (!contact.email || !contact.email.includes('@')) throw new Error('Aucune adresse e-mail exploitable pour cet artiste.');
+    await sendEmail(contact.email, 'Mise à jour de votre demande · MUSIC HOUSE BTA',
+      emailHtml('Votre demande a été étudiée', 'Nous ne pouvons malheureusement pas retenir cette demande à la date proposée. Vous pouvez nous contacter pour convenir d’un autre créneau.', details, APP_URL + '/appointments', 'Voir mes rendez-vous', extra),
+      'studio-appointment-rejected-' + appointmentId);
+    return { rejected: true, emailSent: true };
+  } catch (error) {
+    return { rejected: true, emailSent: false, emailError: String(error && error.message || error).slice(0, 320) };
+  }
+}
+
+
 async function handleRequest(req, context, body) {
   const action = String(body.action || '');
   const db = context.services.db;
@@ -255,14 +467,29 @@ async function handleRequest(req, context, body) {
       ['Date souhaitée', dateLabel(appointment.startsAt)], ['Statut', 'Demande reçue']];
     const tasks = [];
     if (recipient) tasks.push(sendEmail(recipient, 'Votre demande de rendez-vous a bien été reçue',
-      emailHtml('Votre demande de rendez-vous est enregistrée', 'Le studio vérifie la disponibilité et vous adressera une confirmation dès que le rendez-vous aura été validé.', details, APP_URL, 'Suivre ma demande'),
+      emailHtml('Votre demande de rendez-vous est enregistrée', 'Le studio vérifie la disponibilité et vous adressera une confirmation dès que le rendez-vous aura été validé.', details, APP_URL + '/appointments', 'Suivre ma demande'),
       'studio-appointment-request-artist-' + appointmentId));
-    if (context.role === 'client') tasks.push(sendManagerEmail('Nouvelle demande de rendez-vous',
-      'Un artiste vient de soumettre une demande de séance. Elle attend la vérification du manager.', details,
-      'studio-appointment-request-manager-' + appointmentId));
-    await Promise.all(tasks);
+    if (context.role === 'client') {
+      tasks.push(sendManagerEmail('Nouvelle demande de rendez-vous',
+        'Un artiste vient de soumettre une demande de séance. Elle attend la vérification du manager.', details,
+        'studio-appointment-request-manager-' + appointmentId));
+      try {
+        const manager = await context.services.auth.getUserByEmail(MANAGER_EMAIL);
+        await createUserNotification(db, context.services, manager.uid, 'Nouvelle demande de rendez-vous',
+          (appointment.artistName || contact.name) + ' demande « ' + appointment.serviceName + ' ». Vérifiez la date et acceptez ou refusez la demande.',
+          'appointment_requested');
+      } catch (notificationError) {
+        console.error('[MUSIC HOUSE MANAGER NOTIFICATION]', notificationError && notificationError.message || notificationError);
+      }
+    }
+    const outcomes = await Promise.allSettled(tasks);
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (failed) throw new Error('La demande est enregistrée, mais un e-mail n’a pas pu être envoyé : ' + String(failed.reason && failed.reason.message || failed.reason));
     return { sent: tasks.length > 0, skipped: !recipient };
   }
+
+  if (action === 'acceptAppointment') return acceptAppointment(context, body);
+  if (action === 'rejectAppointment') return rejectAppointment(context, body);
 
   if (action === 'appointmentConfirmed') {
     requireRole(context, 'manager');
