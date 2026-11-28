@@ -812,29 +812,6 @@ function TeamPage({ rows, onAdd }: { rows: Array<{ uid: string; displayName: str
   </>;
 }
 
-function ServicesPage({ role, rows, whatsappNumber, onBook, onAdd, onEdit, onToggle }: {
-  role: string; rows: Service[]; whatsappNumber: string;
-  onBook: (row: Service) => void; onAdd: () => void; onEdit: (row: Service) => void; onToggle: (row: Service) => void;
-}) {
-  const canManage = role === 'manager' || role === 'producer';
-  const whatsappDigits = String(whatsappNumber || '').replace(/\D/g, '');
-  return <><PageHeader eyebrow="OFFRE DU STUDIO" title={role === 'client' ? 'Prestations disponibles' : 'Catalogue des prestations'} subtitle={role === 'client' ? 'Choisissez un service, consultez son tarif et demandez votre séance en quelques étapes.' : 'Définissez les services, les tarifs, les remises et les conditions de règlement.'} action={canManage ? <Button variant="primary" onClick={onAdd}><Plus size={16} /> Nouvelle prestation</Button> : undefined} />
-    <div className="service-grid">{rows.filter((row) => role === 'client' ? row.isActive : true).map((row) => {
-      const discount = Math.max(0, Math.min(90, Number(row.discountPercent) || 0));
-      const finalPrice = Math.round(Number(row.priceXaf) * (100 - discount) / 100);
-      const deposit = Math.ceil(finalPrice * (Number(row.depositPercent) || 0) / 100);
-      return <article className="service-card" key={row.id}>
-        <div className="service-symbol"><Music2 size={19} /></div><span className="service-category">{row.category}</span><h3>{row.name}</h3><p>{row.description || 'Prestation proposée par le studio.'}</p>
-        <div className="service-meta"><div><b>{formatXaf(finalPrice)}</b>{discount > 0 && <small className="table-sub"><s>{formatXaf(row.priceXaf)}</s> · remise {discount} %</small>}</div><small>{row.durationMinutes ? `${row.durationMinutes} min` : 'Durée à convenir'} · Acompte {row.depositPercent}% ({formatXaf(deposit)})</small></div>
-        {role === 'client' && <div className="service-card-foot"><Button variant="primary" onClick={() => onBook(row)}>Réserver cette prestation</Button></div>}
-        {canManage && <div className="service-card-foot"><StatusPill value={row.isActive ? 'active' : 'archived'} /><button className="text-link" onClick={() => onEdit(row)}>Modifier</button><button className="text-link" onClick={() => onToggle(row)}>{row.isActive ? 'Désactiver' : 'Réactiver'}</button></div>}
-      </article>;
-    })}</div>
-    {!rows.filter((row) => role === 'client' ? row.isActive : true).length && <EmptyState title="Le catalogue est vide" text="Les prestations ajoutées par le manager ou le producteur apparaîtront ici." />}
-    {role === 'client' && whatsappDigits && <p className="small-note">Une question avant de réserver ? <a className="text-link" href={`https://wa.me/${whatsappDigits}`} target="_blank" rel="noreferrer">Contacter le studio sur WhatsApp ↗</a></p>}
-  </>;
-}
-
 function AppointmentsPage({ role, rows, producers = [], whatsappNumber, onAdd, onPayDeposit, onAccept, onReject, onAssignProducer, onCancel, onReschedule, onProgress }: {
   role: string; rows: Appointment[]; producers?: Array<{ uid: string; displayName: string }>; whatsappNumber: string;
   onAdd: () => void; onPayDeposit: (row: Appointment, paymentType: 'deposit' | 'full') => void;

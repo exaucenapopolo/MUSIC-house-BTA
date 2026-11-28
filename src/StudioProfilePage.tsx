@@ -1,6 +1,6 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
-import { ArrowUpRight, Camera, ImagePlus, MapPin, Music2, Save, ShieldCheck, Trash2, Users } from 'lucide-react';
-import type { StudioGalleryItem, StudioProfile, StudioTeamMember } from './domain';
+import { ArrowUpRight, Camera, ImagePlus, MapPin, Music2, Plus, Save, ShieldCheck, Trash2, Users } from 'lucide-react';
+import type { StudioProfile, StudioTeamMember } from './domain';
 import { uploadStudioImage } from './cloudinary';
 
 const EMPTY_PROFILE: StudioProfile = {
