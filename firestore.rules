@@ -25,7 +25,7 @@ service cloud.firestore {
     function validServiceSnapshot() {
       let servicePath = /databases/$(database)/documents/services/$(request.resource.data.serviceId);
       let service = get(servicePath).data;
-      let original = Number(service.priceXaf);
+      let original = service.priceXaf;
       let discount = service.get('discountPercent', 0);
       let expectedPrice = original * (100 - discount) / 100;
       let depositPercent = service.get('depositPercent', 50);
@@ -214,7 +214,7 @@ service cloud.firestore {
         || isProducer()
           && resource.data.status == 'joint_required'
           && resource.data.jointApprovalRequired == true
-          && !resource.data.keys().hasAny(['producerApprovedBy'])
+          && resource.data.get('producerApprovedBy', null) == null
           && request.resource.data.producerApprovedBy == request.auth.uid
           && request.resource.data.status in ['joint_required', 'approved']
           && changedOnly(['producerApprovedBy', 'producerApprovedAt', 'status', 'reviewedBy', 'reviewedAt', 'updatedAt']);
