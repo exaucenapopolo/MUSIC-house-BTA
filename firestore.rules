@@ -1,12 +1,271 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // MODE TEMPORAIRE DE DÉVELOPPEMENT :
-    // toute personne connectée peut lire et écrire dans Firestore.
-    // Les visiteurs non authentifiés sont refusés.
-    // À remplacer par des règles par rôle/collection avant l'ouverture publique.
+    function signedIn() {
+      return request.auth != null;
+    }
+    function role() {
+      return signedIn() ? request.auth.token.get('role', 'client') : 'none';
+    }
+    function isManager() {
+      return signedIn() && role() == 'manager';
+    }
+    function isProducer() {
+      return signedIn() && role() == 'producer';
+    }
+    function isStaff() {
+      return isManager() || isProducer();
+    }
+    function isOwner(field) {
+      return signedIn() && resource.data.get(field, '') == request.auth.uid;
+    }
+    function changedOnly(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+    function validServiceSnapshot() {
+      let servicePath = /databases/$(database)/documents/services/$(request.resource.data.serviceId);
+      let service = get(servicePath).data;
+      let original = Number(service.priceXaf);
+      let discount = service.get('discountPercent', 0);
+      let expectedPrice = original * (100 - discount) / 100;
+      let depositPercent = service.get('depositPercent', 50);
+      let expectedDeposit = request.resource.data.servicePriceXaf * depositPercent / 100;
+      return exists(servicePath)
+        && service.isActive == true
+        && request.resource.data.serviceName == service.name
+        && request.resource.data.serviceOriginalPriceXaf == original
+        && request.resource.data.discountPercent == discount
+        && request.resource.data.servicePriceXaf >= expectedPrice - 0.5
+        && request.resource.data.servicePriceXaf <= expectedPrice + 0.5
+        && request.resource.data.depositExpectedXaf >= expectedDeposit
+        && request.resource.data.depositExpectedXaf < expectedDeposit + 1
+        && request.resource.data.splitType == service.splitType
+        && request.resource.data.allowFullPayment == service.get('allowFullPayment', true);
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isStaff());
+      allow create: if isManager()
+        || (signedIn() && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.role == 'client'
+          && request.resource.data.active == true);
+      allow update: if isManager()
+        || (signedIn() && request.auth.uid == uid
+          && changedOnly(['displayName', 'photoURL', 'updatedAt'])
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.active == resource.data.active
+          && request.resource.data.uid == resource.data.uid);
+      allow delete: if isManager();
+    }
+
+    match /artists/{artistId} {
+      allow read: if isManager()
+        || (isProducer() && resource.data.get('producerUids', []).hasAny([request.auth.uid]))
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid)
+        || (signedIn() && artistId == request.auth.uid);
+      allow create: if isManager() || isProducer()
+        || (signedIn() && artistId == request.auth.uid
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.source == 'site'
+          && request.resource.data.status == 'active');
+      allow update: if isManager()
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid
+          && changedOnly(['fullName', 'stageName', 'phone', 'city', 'genre', 'bio', 'photoURL', 'socials', 'updatedAt'])
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.get('producerUids', []) == resource.data.get('producerUids', []))
+        || (isProducer()
+          && changedOnly(['producerUids', 'updatedAt'])
+          && request.resource.data.get('producerUids', []).hasAll(resource.data.get('producerUids', []))
+          && request.resource.data.get('producerUids', []).hasAny([request.auth.uid]));
+      allow delete: if isManager();
+    }
+
+    match /services/{serviceId} {
+      allow read: if signedIn() && (isStaff() || resource.data.isActive == true);
+      allow create, update, delete: if isStaff();
+    }
+
+    match /appointments/{appointmentId} {
+      allow read: if isManager()
+        || (isProducer() && resource.data.get('producerUid', '') == request.auth.uid)
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid);
+      allow create: if isStaff()
+          && validServiceSnapshot()
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.amountPaidXaf == 0
+          && ((request.resource.data.depositExpectedXaf > 0 && request.resource.data.status == 'awaiting_deposit')
+            || (request.resource.data.depositExpectedXaf == 0 && request.resource.data.status == 'requested'))
+        || (signedIn() && role() == 'client'
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.artistId == request.auth.uid
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.amountPaidXaf == 0
+          && validServiceSnapshot()
+          && ((request.resource.data.depositExpectedXaf > 0 && request.resource.data.status == 'awaiting_deposit')
+            || (request.resource.data.depositExpectedXaf == 0 && request.resource.data.status == 'requested')));
+      allow update: if isManager()
+          && changedOnly(['producerUid', 'producerName', 'resourceId', 'startsAt', 'endsAt', 'status',
+            'internalNote', 'updatedAt', 'confirmedAt', 'depositWaived', 'depositWaivedBy',
+            'depositWaiverReason', 'depositWaivedAt', 'rescheduledFrom', 'rescheduledAt', 'amountPaidXaf'])
+        || (isProducer()
+          && resource.data.get('producerUid', '') == request.auth.uid
+          && changedOnly(['resourceId', 'startsAt', 'endsAt', 'status', 'internalNote', 'updatedAt',
+            'confirmedAt', 'rescheduledFrom', 'rescheduledAt', 'amountPaidXaf']))
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid
+          && changedOnly(['clientNote', 'status', 'updatedAt'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
+            || request.resource.data.status == 'cancelled'));
+      allow delete: if isManager();
+    }
+
+    match /appointmentLocks/{lockId} {
+      function appointmentOwnedByCaller(appointmentId) {
+        let appointmentPath = /databases/$(database)/documents/appointments/$(appointmentId);
+        return signedIn() && exists(appointmentPath)
+          && get(appointmentPath).data.ownerUid == request.auth.uid;
+      }
+      allow read: if isStaff() || appointmentOwnedByCaller(resource.data.appointmentId);
+      allow create, update: if isStaff();
+      allow delete: if isStaff() || appointmentOwnedByCaller(resource.data.appointmentId);
+    }
+
+    match /projects/{projectId} {
+      allow read: if isManager()
+        || (isProducer() && resource.data.get('producerUid', '') == request.auth.uid)
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid
+          && resource.data.get('clientVisible', false) == true);
+      allow create: if isStaff() && request.resource.data.get('producerUid', '') != '';
+      allow update: if isManager()
+        || (isProducer() && resource.data.get('producerUid', '') == request.auth.uid
+          && changedOnly(['status', 'clientProgress', 'steps', 'updatedAt']));
+      allow delete: if isManager();
+
+      match /internalNotes/{noteId} {
+        function parentProject() {
+          return get(/databases/$(database)/documents/projects/$(projectId)).data;
+        }
+        allow read: if isManager()
+          || (isProducer() && parentProject().producerUid == request.auth.uid);
+        allow create: if isStaff()
+          && request.resource.data.authorUid == request.auth.uid
+          && (isManager() || parentProject().producerUid == request.auth.uid);
+        allow update, delete: if isManager();
+      }
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isManager()
+        || (isProducer() && resource.data.get('producerUid', '') == request.auth.uid);
+      allow create, update, delete: if isStaff();
+    }
+
+    match /paymentReceipts/{receiptId} {
+      allow read: if isManager() || isProducer() || isOwner('ownerUid');
+      allow create, update, delete: if isStaff();
+    }
+
+    match /paymentSubmissions/{submissionId} {
+      allow read: if isManager() || isOwner('ownerUid');
+      allow create: if signedIn() && role() == 'client'
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.amountXaf is int
+        && request.resource.data.amountXaf > 0;
+      allow update, delete: if isManager();
+    }
+
+    match /paymentAttempts/{attemptId} {
+      allow read: if isManager();
+      allow write: if false;
+    }
+
+    match /commissionEntries/{entryId} {
+      allow read: if isManager()
+        || (isProducer() && resource.data.get('beneficiaryRole', '') == 'producer'
+          && resource.data.get('beneficiaryUid', '') == request.auth.uid);
+      allow create: if isStaff();
+      allow update: if isManager()
+        || (isProducer()
+          && resource.data.get('beneficiaryRole', '') == 'producer'
+          && resource.data.get('beneficiaryUid', '') == request.auth.uid
+          && resource.data.status == 'due'
+          && request.resource.data.status == 'paid'
+          && changedOnly(['status', 'paidAt', 'paidBy']));
+      allow delete: if isManager();
+    }
+
+    match /allocationBalances/{balanceId} {
+      allow read, write: if isManager();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isManager()
+        || (isProducer() && (resource.data.get('submittedBy', '') == request.auth.uid
+          || resource.data.get('jointApprovalRequired', false) == true));
+      allow create: if isManager()
+          && request.resource.data.submittedBy == request.auth.uid
+        || isProducer() && request.resource.data.submittedBy == request.auth.uid
+          && request.resource.data.status in ['declared', 'joint_required'];
+      allow update: if isManager()
+          && changedOnly(['status', 'reviewedBy', 'reviewedAt', 'updatedAt',
+            'managerApprovedBy', 'managerApprovedAt', 'producerApprovedBy', 'producerApprovedAt'])
+        || isProducer()
+          && resource.data.status == 'joint_required'
+          && resource.data.jointApprovalRequired == true
+          && !resource.data.keys().hasAny(['producerApprovedBy'])
+          && request.resource.data.producerApprovedBy == request.auth.uid
+          && request.resource.data.status in ['joint_required', 'approved']
+          && changedOnly(['producerApprovedBy', 'producerApprovedAt', 'status', 'reviewedBy', 'reviewedAt', 'updatedAt']);
+      allow delete: if isManager();
+    }
+
+    match /distributionOrders/{orderId} {
+      allow read: if isManager()
+        || (signedIn() && resource.data.get('ownerUid', '') == request.auth.uid
+          && resource.data.get('clientVisible', false) == true);
+      allow create: if isStaff()
+          && request.resource.data.createdBy == request.auth.uid
+        || (signedIn() && role() == 'client'
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.status == 'submitted');
+      allow update: if isManager();
+      allow delete: if isManager();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.get('recipientUid', '') == request.auth.uid;
+      allow create: if isStaff()
+        && request.resource.data.get('createdBy', request.auth.uid) == request.auth.uid;
+      allow update: if signedIn()
+        && resource.data.get('recipientUid', '') == request.auth.uid
+        && changedOnly(['readAt'])
+        && request.resource.data.readAt != null;
+      allow delete: if isManager();
+    }
+
+    match /activityLogs/{logId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.actorUid == request.auth.uid;
+      allow update, delete: if isManager();
+    }
+
+    match /settings/{settingId} {
+      allow read: if signedIn() && (settingId == 'bookingPolicy' || isStaff());
+      allow create, update: if isManager()
+          && settingId == 'commissionRates'
+        || isStaff() && settingId == 'bookingPolicy';
+      allow delete: if isManager();
+      match /history/{historyId} {
+        allow read, write: if isManager();
+      }
+    }
+
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
     }
   }
 }
